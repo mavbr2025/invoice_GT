@@ -27,11 +27,16 @@ def healthz() -> dict[str, str]:
 async def clickup_customer_sync(
     request: Request,
     x_webhook_token: str | None = Header(default=None, alias="X-Webhook-Token"),
+    authorization: str | None = Header(default=None, alias="Authorization"),
 ) -> dict[str, Any]:
     expected_token = os.getenv("CLICKUP_WEBHOOK_TOKEN", "").strip()
     if not expected_token:
         raise HTTPException(status_code=500, detail="CLICKUP_WEBHOOK_TOKEN is not configured.")
-    if x_webhook_token != expected_token:
+    provided_token = _extract_webhook_token(
+        x_webhook_token=x_webhook_token,
+        authorization=authorization,
+    )
+    if provided_token != expected_token:
         raise HTTPException(status_code=401, detail="Invalid webhook token.")
 
     payload = await request.json()
@@ -154,3 +159,20 @@ def _env_bool(name: str, *, default: bool) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _extract_webhook_token(
+    *,
+    x_webhook_token: str | None,
+    authorization: str | None,
+) -> str | None:
+    if x_webhook_token:
+        return x_webhook_token.strip()
+
+    if not authorization:
+        return None
+
+    value = authorization.strip()
+    if value.lower().startswith("bearer "):
+        return value[7:].strip()
+    return value
