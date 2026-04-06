@@ -39,10 +39,13 @@ async def clickup_customer_sync(
     if provided_token != expected_token:
         raise HTTPException(status_code=401, detail="Invalid webhook token.")
 
-    payload = await request.json()
+    payload = await _safe_json(request)
     task_id = extract_task_id(payload)
     if not task_id:
-        raise HTTPException(status_code=400, detail="Could not extract Task ID from webhook payload.")
+        return {
+            "status": "ignored",
+            "reason": "missing_task_id",
+        }
 
     clickup = ClickUpClient(ClickUpSettings.from_env())
     bc = BusinessCentralClient(BusinessCentralSettings.from_env())
@@ -159,6 +162,17 @@ def _env_bool(name: str, *, default: bool) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+async def _safe_json(request: Request) -> dict[str, Any]:
+    try:
+        payload = await request.json()
+    except Exception:
+        return {}
+
+    if isinstance(payload, dict):
+        return payload
+    return {}
 
 
 def _extract_webhook_token(

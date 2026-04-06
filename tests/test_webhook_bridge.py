@@ -13,3 +13,7 @@ def test_extract_task_id_supports_nested_task_object() -> None:
 
 def test_extract_task_id_returns_none_when_missing() -> None:
     assert extract_task_id({"foo": "bar"}) is None
+
+
+def test_extract_task_id_returns_none_for_empty_payload() -> None:
+    assert extract_task_id({}) is None
