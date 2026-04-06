@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: clickup-bc-customer-bridge
+    env: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn webhook_bridge.main:app --host 0.0.0.0 --port $PORT
+    autoDeploy: false
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.11
+      - key: CLICKUP_WEBHOOK_CUSTOM_TASK_IDS
+        value: "true"
