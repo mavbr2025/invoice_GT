@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 from clickup_integration.bc_sync import prepare_clickup_to_bc_customer_sync
+from clickup_integration.bc_sync import apply_clickup_to_bc_customer_sync
 
 
 class FakeBCClient:
@@ -40,6 +41,24 @@ class FakeBCClient:
         if code_or_name == "CREDITO":
             return {"id": "method-credit", "code": "CREDITO"}
         return None
+
+    def patch_entity(self, entity_name: str, entity_id: str, payload: dict, *, market: str | None = None):
+        assert entity_name == "customers"
+        assert entity_id == "bc-id-1"
+        assert market == "GT"
+        return {
+            "id": entity_id,
+            **payload,
+        }
+
+
+class FakeBCClientWithBrokenExtension(FakeBCClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.settings.customer_invoicing_sync_path = "/api/customers({customer_id})/invoicing"
+
+    def patch_company_path(self, path: str, payload: dict, *, company_id: str | None = None, market: str | None = None, customer_id: str | None = None):
+        raise RuntimeError("custom invoicing endpoint unavailable")
 
 
 def test_prepare_clickup_to_bc_customer_sync() -> None:
@@ -138,3 +157,47 @@ def test_prepare_clickup_to_bc_customer_sync_blocks_unconfirmed() -> None:
     )
 
     assert preview["status"] == "not_confirmed"
+
+
+def test_apply_clickup_to_bc_customer_sync_tolerates_extension_failure() -> None:
+    clickup_summary = {
+        "task_id": "task-1",
+        "status": "current customer",
+        "market": "GT",
+        "custom_fields": {
+            "Business Central Customer ID": {"value": "bc-id-1"},
+            "Business Central Customer Number": {"value": "C00025"},
+            "BC Match Status": {
+                "value": 2,
+                "type_config": {
+                    "options": [
+                        {"id": "opt-0", "name": "Unmatched", "orderindex": 0},
+                        {"id": "opt-1", "name": "Likely Match", "orderindex": 1},
+                        {"id": "opt-2", "name": "Confirmed", "orderindex": 2},
+                    ]
+                },
+            },
+            "Business Central Legal Name": {"value": "GIAI INNOVATIONS, SOCIEDAD ANONIMA"},
+            "Customer Tax ID": {"value": "96271256"},
+            "Contact E-mail 1": {"value": "new@example.com"},
+            "Contact Phone 1": {"value": "+502 5950 9758"},
+            "Webpage": {"value": "https://biorgani.tech/"},
+            "Customer Address": {"value": "NEW ADDRESS"},
+            "Credit Days Required": {"value": "7"},
+            "Credit amount approved": {
+                "id": "54574add-833f-42a5-b027-3b0d64ef95af",
+                "value": "21400.23",
+            },
+            "Contact Name 1": {"value": "Magdalena Perez"},
+        },
+    }
+
+    result = apply_clickup_to_bc_customer_sync(
+        clickup_summary=clickup_summary,
+        bc_client=FakeBCClientWithBrokenExtension(),
+    )
+
+    assert result["status"] == "applied"
+    assert result["updated_customer"]["email"] == "new@example.com"
+    assert result["invoicing_extension"]["status"] == "failed"
+    assert "unavailable" in result["invoicing_extension"]["message"]

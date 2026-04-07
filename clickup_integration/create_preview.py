@@ -297,7 +297,7 @@ def apply_clickup_bc_customer_create(
         preview["proposed_bc_payload"],
         market=preview["market"],
     )
-    _apply_customer_invoicing_extension(
+    extension_result = _apply_customer_invoicing_extension(
         bc_client=bc_client,
         customer_id=created_customer["id"],
         market=preview["market"],
@@ -309,12 +309,15 @@ def apply_clickup_bc_customer_create(
         market=preview["market"],
         bc_client=bc_client,
     )
-    return {
+    result = {
         **preview,
         "status": "applied",
         "created_customer": created_customer,
         "writeback": writeback,
     }
+    if extension_result:
+        result["invoicing_extension"] = extension_result
+    return result
 
 
 def prepare_clickup_bc_created_customer_writeback(
@@ -430,18 +433,31 @@ def _apply_customer_invoicing_extension(
     customer_id: str,
     market: str,
     invoicing_payload: dict[str, Any],
-) -> None:
+) -> dict[str, Any] | None:
     path = getattr(bc_client.settings, "customer_invoicing_sync_path", None)
     if not path:
-        return
+        return None
 
     payload = {key: value for key, value in invoicing_payload.items() if value not in {None, ""}}
     if not payload:
-        return
+        return None
 
-    bc_client.patch_company_path(
-        path,
-        payload,
-        market=market,
-        customer_id=customer_id,
-    )
+    try:
+        response = bc_client.patch_company_path(
+            path,
+            payload,
+            market=market,
+            customer_id=customer_id,
+        )
+    except Exception as exc:
+        return {
+            "status": "failed",
+            "message": str(exc),
+            "path": path,
+        }
+
+    return {
+        "status": "applied",
+        "path": path,
+        "response": response,
+    }

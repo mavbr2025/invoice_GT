@@ -44,6 +44,15 @@ class FakeBCClient:
         return None
 
 
+class FakeBCClientWithBrokenExtension(FakeBCClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.settings.customer_invoicing_sync_path = "/api/customers({customer_id})/invoicing"
+
+    def patch_company_path(self, path: str, payload: dict, *, company_id: str | None = None, market: str | None = None, customer_id: str | None = None):
+        raise RuntimeError("custom invoicing endpoint unavailable")
+
+
 def make_clickup_summary() -> dict:
     return {
         "task_id": "task-1",
@@ -124,3 +133,16 @@ def test_apply_clickup_bc_customer_create_blocks_duplicate_risk() -> None:
     )
 
     assert result["status"] == "blocked_duplicate_risk"
+
+
+def test_apply_clickup_bc_customer_create_tolerates_extension_failure() -> None:
+    result = apply_clickup_bc_customer_create(
+        clickup_summary=make_clickup_summary(),
+        current_match_result={"status": "no_match", "market": "GT", "candidates": []},
+        bc_client=FakeBCClientWithBrokenExtension(),
+    )
+
+    assert result["status"] == "applied"
+    assert result["created_customer"]["number"] == "C00123"
+    assert result["invoicing_extension"]["status"] == "failed"
+    assert "unavailable" in result["invoicing_extension"]["message"]
