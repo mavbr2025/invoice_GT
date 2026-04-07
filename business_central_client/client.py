@@ -139,6 +139,36 @@ class BusinessCentralClient:
             headers={"If-Match": if_match},
         )
 
+    def patch_company_path(
+        self,
+        path: str,
+        payload: dict[str, Any],
+        *,
+        company_id: str | None = None,
+        market: str | None = None,
+        if_match: str = "*",
+        **path_params: str,
+    ) -> dict[str, Any]:
+        company = self._resolve_company_id(company_id=company_id, market=market)
+        if not company:
+            raise ValueError(
+                "A company ID is required. Set BC_COMPANY_ID, configure BC_MARKET_<CODE>_COMPANY_ID, "
+                "or pass company_id explicitly."
+            )
+
+        normalized_path = path.strip()
+        if normalized_path.startswith("http://") or normalized_path.startswith("https://"):
+            url = normalized_path
+        else:
+            url = self._expand_relative_path(normalized_path, company, **path_params)
+
+        return self._request(
+            "PATCH",
+            url,
+            json=payload,
+            headers={"If-Match": if_match},
+        )
+
     def post_to_company(
         self,
         path: str,
@@ -162,9 +192,9 @@ class BusinessCentralClient:
 
         return self._request("POST", url, json=payload)
 
-    def _expand_relative_path(self, path: str, company_id: str) -> str:
+    def _expand_relative_path(self, path: str, company_id: str, **path_params: str) -> str:
         cleaned = path if path.startswith("/") else f"/{path}"
-        rendered = cleaned.format(company_id=company_id)
+        rendered = cleaned.format(company_id=company_id, **path_params)
         if rendered.startswith("/api/"):
             return f"https://api.businesscentral.dynamics.com/v2.0/{self.settings.environment}{rendered}"
         if rendered.startswith("/companies("):
@@ -173,6 +203,34 @@ class BusinessCentralClient:
             "Unsupported relative path. Use an absolute URL, a path starting with "
             "'/api/', or a company-scoped path starting with '/companies('."
         )
+
+    def resolve_payment_term(self, code_or_name: str, *, market: str | None = None) -> dict[str, Any] | None:
+        needle = (code_or_name or "").strip().upper()
+        if not needle:
+            return None
+
+        rows = self.get_entities("paymentTerms", top=500, market=market).get("value", [])
+        for row in rows:
+            if (row.get("code") or "").strip().upper() == needle:
+                return row
+        for row in rows:
+            if (row.get("displayName") or "").strip().upper() == needle:
+                return row
+        return None
+
+    def resolve_payment_method(self, code_or_name: str, *, market: str | None = None) -> dict[str, Any] | None:
+        needle = (code_or_name or "").strip().upper()
+        if not needle:
+            return None
+
+        rows = self.get_entities("paymentMethods", top=500, market=market).get("value", [])
+        for row in rows:
+            if (row.get("code") or "").strip().upper() == needle:
+                return row
+        for row in rows:
+            if (row.get("displayName") or "").strip().upper() == needle:
+                return row
+        return None
 
     def _resolve_company_id(
         self,

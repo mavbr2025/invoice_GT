@@ -4,6 +4,17 @@ import re
 from typing import Any
 
 from business_central_client.client import BusinessCentralClient
+from clickup_integration.customer_rules import (
+    CLICKUP_CONTACT_NAME_1_FIELD_ID,
+    field_value,
+    location_formatted_address,
+    normalize_customer_name,
+    normalize_email,
+    normalize_tax_id_digits,
+    payment_method_code_from_credit_terms,
+    resolve_clickup_credit_approved,
+    resolve_clickup_credit_terms,
+)
 from clickup_integration.mapping import is_current_customer_status
 from clickup_integration.writeback import _resolve_dropdown_option_name
 
@@ -20,6 +31,18 @@ CLICKUP_PHONE_FIELD_CANDIDATES = (
 )
 
 CLICKUP_WEBSITE_FIELD = "Webpage"
+CLICKUP_EMAIL_FIELD_CANDIDATES = (
+    "Contact Email 1",
+    "Contact E-mail 1",
+    "Operations Email",
+    "Sales email",
+    "Finance email",
+)
+CLICKUP_TAX_ID_FIELD_CANDIDATES = (
+    "Customer Tax ID",
+    "Tax ID",
+)
+CLICKUP_ADDRESS_FIELD = "Customer Address"
 BC_FIELD_NAMES = {
     "customer_id": "Business Central Customer ID",
     "customer_number": "Business Central Customer Number",
@@ -77,10 +100,44 @@ def prepare_clickup_to_bc_customer_sync(
     bc_customer = bc_client.get_entity("customers", bc_customer_id, market=market)
 
     clickup_phone = _first_present_field(custom_fields, CLICKUP_PHONE_FIELD_CANDIDATES)
-    clickup_website = _field_value(custom_fields, CLICKUP_WEBSITE_FIELD)
+    clickup_website = field_value(custom_fields, field_name=CLICKUP_WEBSITE_FIELD)
+    clickup_email = normalize_email(_first_present_field(custom_fields, CLICKUP_EMAIL_FIELD_CANDIDATES))
+    clickup_contact_name = field_value(
+        custom_fields,
+        field_name="Contact Name 1",
+        field_id=CLICKUP_CONTACT_NAME_1_FIELD_ID,
+    )
+    clickup_tax_id = normalize_tax_id_digits(_first_present_field(custom_fields, CLICKUP_TAX_ID_FIELD_CANDIDATES))
+    clickup_legal_name = normalize_customer_name(
+        field_value(custom_fields, field_name="Business Central Legal Name")
+    )
+    clickup_address = location_formatted_address(custom_fields, field_name=CLICKUP_ADDRESS_FIELD)
+    clickup_credit_terms = resolve_clickup_credit_terms(custom_fields)
+    clickup_credit_approved = resolve_clickup_credit_approved(custom_fields)
+    payment_term = (
+        bc_client.resolve_payment_term(clickup_credit_terms, market=market)
+        if clickup_credit_terms
+        else None
+    )
+    payment_method_code = payment_method_code_from_credit_terms(clickup_credit_terms)
+    payment_method = (
+        bc_client.resolve_payment_method(payment_method_code, market=market)
+        if payment_method_code
+        else None
+    )
 
     proposed_updates: dict[str, str] = {}
     comparison = {
+        "display_name": {
+            "clickup": clickup_legal_name or None,
+            "bc": (bc_customer.get("displayName") or None),
+            "will_update": False,
+        },
+        "email": {
+            "clickup": clickup_email or None,
+            "bc": (bc_customer.get("email") or None),
+            "will_update": False,
+        },
         "phone": {
             "clickup": clickup_phone or None,
             "bc": (bc_customer.get("phoneNumber") or None),
@@ -91,7 +148,40 @@ def prepare_clickup_to_bc_customer_sync(
             "bc": (bc_customer.get("website") or None),
             "will_update": False,
         },
+        "tax_id": {
+            "clickup": clickup_tax_id or None,
+            "bc": (bc_customer.get("taxRegistrationNumber") or None),
+            "will_update": False,
+        },
+        "address": {
+            "clickup": clickup_address or None,
+            "bc": (bc_customer.get("addressLine1") or None),
+            "will_update": False,
+        },
+        "payment_terms": {
+            "clickup": clickup_credit_terms or None,
+            "bc": (bc_customer.get("paymentTermsId") or None),
+            "will_update": False,
+        },
+        "payment_method": {
+            "clickup": payment_method_code or None,
+            "bc": (bc_customer.get("paymentMethodId") or None),
+            "will_update": False,
+        },
+        "credit_limit": {
+            "clickup": clickup_credit_approved,
+            "bc": bc_customer.get("creditLimit"),
+            "will_update": False,
+        },
     }
+
+    if clickup_legal_name and clickup_legal_name != (bc_customer.get("displayName") or ""):
+        proposed_updates["displayName"] = clickup_legal_name
+        comparison["display_name"]["will_update"] = True
+
+    if clickup_email and clickup_email != (bc_customer.get("email") or ""):
+        proposed_updates["email"] = clickup_email
+        comparison["email"]["will_update"] = True
 
     if clickup_phone and not _phone_equivalent(clickup_phone, bc_customer.get("phoneNumber") or ""):
         proposed_updates["phoneNumber"] = clickup_phone
@@ -101,8 +191,49 @@ def prepare_clickup_to_bc_customer_sync(
         proposed_updates["website"] = clickup_website
         comparison["website"]["will_update"] = True
 
+    if clickup_tax_id and _digits_only(clickup_tax_id) != _digits_only(bc_customer.get("taxRegistrationNumber") or ""):
+        proposed_updates["taxRegistrationNumber"] = clickup_tax_id
+        comparison["tax_id"]["will_update"] = True
+
+    if clickup_address and clickup_address != (bc_customer.get("addressLine1") or ""):
+        proposed_updates["addressLine1"] = clickup_address
+        comparison["address"]["will_update"] = True
+
+    if payment_term and payment_term["id"] != (bc_customer.get("paymentTermsId") or ""):
+        proposed_updates["paymentTermsId"] = payment_term["id"]
+        comparison["payment_terms"]["will_update"] = True
+
+    if payment_method and payment_method["id"] != (bc_customer.get("paymentMethodId") or ""):
+        proposed_updates["paymentMethodId"] = payment_method["id"]
+        comparison["payment_method"]["will_update"] = True
+
+    if clickup_credit_approved is not None and clickup_credit_approved != bc_customer.get("creditLimit"):
+        proposed_updates["creditLimit"] = clickup_credit_approved
+        comparison["credit_limit"]["will_update"] = True
+
+    invoicing_extension_payload = {
+        "cfdiCustomerName": clickup_legal_name or None,
+        "vatRegistrationNumber": clickup_tax_id or None,
+        "invoiceEmail": clickup_email or None,
+        "correoFactura": clickup_email or None,
+        "contactName": clickup_contact_name or None,
+        "contactEmail": clickup_email or None,
+        "contactPhone": clickup_phone or None,
+        "paymentTermsCode": clickup_credit_terms or None,
+        "paymentMethodCode": payment_method_code or None,
+        "cashFlowPaymentTermsCode": clickup_credit_terms or None,
+        "copySellToAddressTo": "Company",
+        "taxIdentificationType": "Legal Entity",
+        "generalBusinessPostingGroupCode": "NAC",
+        "customerPostingGroupCode": "NAC",
+    }
+    extension_payload = {
+        key: value for key, value in invoicing_extension_payload.items() if value not in {None, ""}
+    }
+    should_apply_extension = bool(getattr(bc_client.settings, "customer_invoicing_sync_path", None) and extension_payload)
+
     return {
-        "status": "dry_run_ready" if proposed_updates else "no_changes",
+        "status": "dry_run_ready" if proposed_updates or should_apply_extension else "no_changes",
         "task_status": task_status,
         "market": market,
         "bc_match_status": match_status_name,
@@ -111,11 +242,19 @@ def prepare_clickup_to_bc_customer_sync(
         "bc_customer_number": bc_customer_number or bc_customer.get("number"),
         "bc_customer_name": bc_customer.get("displayName"),
         "clickup_sources": {
+            "name_field": "Business Central Legal Name" if clickup_legal_name else None,
+            "email_field": _first_present_field_name(custom_fields, CLICKUP_EMAIL_FIELD_CANDIDATES),
             "phone_field": _first_present_field_name(custom_fields, CLICKUP_PHONE_FIELD_CANDIDATES),
             "website_field": CLICKUP_WEBSITE_FIELD if clickup_website else None,
+            "tax_id_field": _first_present_field_name(custom_fields, CLICKUP_TAX_ID_FIELD_CANDIDATES),
+            "address_field": CLICKUP_ADDRESS_FIELD if clickup_address else None,
+            "credit_terms_field_name": "Credit Terms / Credit Days Required" if clickup_credit_terms else None,
+            "credit_approved_field_id": "54574add-833f-42a5-b027-3b0d64ef95af" if clickup_credit_approved is not None else None,
+            "contact_name_field": "Contact Name 1" if clickup_contact_name else None,
         },
         "comparison": comparison,
         "proposed_bc_patch": proposed_updates,
+        "proposed_bc_invoicing_payload": extension_payload,
     }
 
 
@@ -131,11 +270,19 @@ def apply_clickup_to_bc_customer_sync(
     if preview.get("status") != "dry_run_ready":
         return preview
 
-    updated = bc_client.patch_entity(
-        "customers",
-        preview["bc_customer_id"],
-        preview["proposed_bc_patch"],
+    updated = None
+    if preview["proposed_bc_patch"]:
+        updated = bc_client.patch_entity(
+            "customers",
+            preview["bc_customer_id"],
+            preview["proposed_bc_patch"],
+            market=preview["market"],
+        )
+    _apply_customer_invoicing_extension(
+        bc_client=bc_client,
+        customer_id=preview["bc_customer_id"],
         market=preview["market"],
+        invoicing_payload=preview["proposed_bc_invoicing_payload"],
     )
     return {
         **preview,
@@ -145,10 +292,7 @@ def apply_clickup_to_bc_customer_sync(
 
 
 def _field_value(custom_fields: dict[str, Any], field_name: str) -> str:
-    value = (custom_fields.get(field_name) or {}).get("value")
-    if value is None:
-        return ""
-    return str(value).strip()
+    return field_value(custom_fields, field_name=field_name)
 
 
 def _first_present_field(custom_fields: dict[str, Any], field_names: tuple[str, ...]) -> str:
@@ -189,3 +333,26 @@ def _normalize_website(value: str) -> str:
     normalized = (value or "").strip().lower().rstrip("/")
     normalized = re.sub(r"^https?://", "", normalized)
     return normalized
+
+
+def _apply_customer_invoicing_extension(
+    *,
+    bc_client: BusinessCentralClient,
+    customer_id: str,
+    market: str,
+    invoicing_payload: dict[str, Any],
+) -> None:
+    path = getattr(bc_client.settings, "customer_invoicing_sync_path", None)
+    if not path:
+        return
+
+    payload = {key: value for key, value in invoicing_payload.items() if value not in {None, ""}}
+    if not payload:
+        return
+
+    bc_client.patch_company_path(
+        path,
+        payload,
+        market=market,
+        customer_id=customer_id,
+    )

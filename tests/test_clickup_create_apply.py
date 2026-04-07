@@ -11,6 +11,7 @@ class FakeBCClient:
         self.settings = SimpleNamespace(
             tenant_id="tenant-id",
             environment="Production",
+            customer_invoicing_sync_path=None,
         )
 
     def get_company_metadata(self, *, market: str | None = None, company_id: str | None = None):
@@ -21,11 +22,26 @@ class FakeBCClient:
     def post_to_company(self, path: str, payload: dict, *, company_id: str | None = None, market: str | None = None):
         assert path == "/companies({company_id})/customers"
         assert market == "GT"
+        assert payload["paymentTermsId"] == "term-7"
+        assert payload["paymentMethodId"] == "method-credit"
+        assert payload["creditLimit"] == 21400.23
         return {
             "id": "bc-created-id",
             "number": "C00123",
             "displayName": payload["displayName"],
         }
+
+    def resolve_payment_term(self, code_or_name: str, *, market: str | None = None):
+        assert market == "GT"
+        if code_or_name == "7 DÍAS":
+            return {"id": "term-7", "code": "7 DÍAS"}
+        return None
+
+    def resolve_payment_method(self, code_or_name: str, *, market: str | None = None):
+        assert market == "GT"
+        if code_or_name == "CREDITO":
+            return {"id": "method-credit", "code": "CREDITO"}
+        return None
 
 
 def make_clickup_summary() -> dict:
@@ -45,7 +61,12 @@ def make_clickup_summary() -> dict:
             "Contact E-mail 1": {"value": "mayra@fpkelectronicos.com"},
             "Contact Phone 1": {"value": "+502 5511 2349"},
             "Webpage": {"value": "https://fpk.com.gt"},
-            "Customer Address": {"value": {"formatted_address": "11 Calle 5 - 59, Guatemala"}},
+            "Customer Address": {"value": "11 Calle 5 - 59, Guatemala"},
+            "Credit Days Required": {"value": "7"},
+            "Credit amount approved": {
+                "id": "54574add-833f-42a5-b027-3b0d64ef95af",
+                "value": "21400.23",
+            },
             "Business Central Customer Number": {"id": "field-number"},
             "Business Central Customer ID": {"id": "field-id"},
             "Business Central Customer Link": {"id": "field-link"},
@@ -67,7 +88,7 @@ def test_prepare_clickup_bc_created_customer_writeback() -> None:
         created_customer={
             "id": "bc-created-id",
             "number": "C00123",
-            "displayName": "FPK Electronicos, S.A.",
+            "displayName": "FPK ELECTRONICOS, S.A.",
         },
         market="GT",
         bc_client=FakeBCClient(),
@@ -87,6 +108,7 @@ def test_apply_clickup_bc_customer_create() -> None:
 
     assert result["status"] == "applied"
     assert result["created_customer"]["number"] == "C00123"
+    assert result["created_customer"]["displayName"] == "FPK ELECTRONICOS, S.A."
     assert result["writeback"]["bc_customer_number"] == "C00123"
 
 

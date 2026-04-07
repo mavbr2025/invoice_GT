@@ -6,6 +6,7 @@ import re
 import unicodedata
 
 from business_central_client.client import BusinessCentralClient
+from clickup_integration.customer_rules import field_value, normalize_tax_id_digits
 from clickup_integration.mapping import is_current_customer_status
 
 
@@ -40,8 +41,10 @@ def match_clickup_customer_to_bc(
     clickup_name = clickup_summary.get("name") or ""
     clickup_fields = clickup_summary.get("custom_fields") or {}
     clickup_website = (clickup_fields.get("Webpage") or {}).get("value") or ""
-    clickup_tax_id = (clickup_fields.get("Tax ID") or {}).get("value") or ""
-    normalized_clickup_tax_id = _norm_tax_id(clickup_tax_id)
+    clickup_tax_id = field_value(clickup_fields, field_name="Customer Tax ID") or field_value(
+        clickup_fields, field_name="Tax ID"
+    )
+    normalized_clickup_tax_id = normalize_tax_id_digits(clickup_tax_id)
     selected_customer = clickup_fields.get("Clientes/")
     selected_name = ""
     if selected_customer:
@@ -61,7 +64,7 @@ def match_clickup_customer_to_bc(
         row_email = row.get("email") or ""
         row_website = row.get("website") or ""
         row_tax_id = row.get("taxRegistrationNumber") or ""
-        normalized_row_tax_id = _norm_tax_id(row_tax_id)
+        normalized_row_tax_id = normalize_tax_id_digits(row_tax_id)
 
         score = 0.0
         for term in terms:
@@ -149,8 +152,3 @@ def _norm(value: str) -> str:
     value = re.sub(r"[^a-z0-9]+", " ", value)
     return " ".join(value.split())
 
-
-def _norm_tax_id(value: str) -> str:
-    value = unicodedata.normalize("NFKD", value or "").encode("ascii", "ignore").decode("ascii")
-    value = value.upper()
-    return re.sub(r"[^A-Z0-9]+", "", value)

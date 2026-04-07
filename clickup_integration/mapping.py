@@ -62,7 +62,11 @@ def resolve_dropdown_field(field: dict[str, Any] | None) -> dict[str, Any] | Non
     value = field.get("value")
     type_config = field.get("type_config") or {}
     for option in type_config.get("options", []):
-        if option.get("orderindex") == value:
+        if option.get("orderindex") == value or option.get("id") == value:
+            return option
+        if str(option.get("orderindex")) == str(value):
+            return option
+        if str(option.get("id")) == str(value):
             return option
 
     return None

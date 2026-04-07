@@ -5,7 +5,11 @@ from clickup_integration.bc_sync import prepare_clickup_to_bc_customer_sync
 
 class FakeBCClient:
     def __init__(self) -> None:
-        self.settings = SimpleNamespace(tenant_id="tenant-id", environment="Production")
+        self.settings = SimpleNamespace(
+            tenant_id="tenant-id",
+            environment="Production",
+            customer_invoicing_sync_path=None,
+        )
 
     def get_entity(self, entity_name: str, entity_id: str, *, market: str | None = None):
         assert entity_name == "customers"
@@ -15,9 +19,27 @@ class FakeBCClient:
             "id": "bc-id-1",
             "number": "C00025",
             "displayName": "GIAI INNOVATIONS, SOCIEDAD ANONIMA",
+            "email": "old@example.com",
             "phoneNumber": "50401010",
             "website": "",
+            "taxRegistrationNumber": "96271256",
+            "addressLine1": "OLD ADDRESS",
+            "paymentTermsId": "old-term",
+            "paymentMethodId": "old-method",
+            "creditLimit": 0,
         }
+
+    def resolve_payment_term(self, code_or_name: str, *, market: str | None = None):
+        assert market == "GT"
+        if code_or_name == "7 DÍAS":
+            return {"id": "term-7", "code": "7 DÍAS"}
+        return None
+
+    def resolve_payment_method(self, code_or_name: str, *, market: str | None = None):
+        assert market == "GT"
+        if code_or_name == "CREDITO":
+            return {"id": "method-credit", "code": "CREDITO"}
+        return None
 
 
 def test_prepare_clickup_to_bc_customer_sync() -> None:
@@ -38,8 +60,18 @@ def test_prepare_clickup_to_bc_customer_sync() -> None:
                     ]
                 },
             },
+            "Business Central Legal Name": {"value": "GIAI INNOVATIONS, SOCIEDAD ANONIMA"},
+            "Customer Tax ID": {"value": "96271256"},
+            "Contact E-mail 1": {"value": "new@example.com"},
             "Contact Phone 1": {"value": "+502 5950 9758"},
             "Webpage": {"value": "https://biorgani.tech/"},
+            "Customer Address": {"value": "NEW ADDRESS"},
+            "Credit Days Required": {"value": "7"},
+            "Credit amount approved": {
+                "id": "54574add-833f-42a5-b027-3b0d64ef95af",
+                "value": "21400.23",
+            },
+            "Contact Name 1": {"value": "Magdalena Perez"},
         },
     }
 
@@ -50,10 +82,32 @@ def test_prepare_clickup_to_bc_customer_sync() -> None:
 
     assert preview["status"] == "dry_run_ready"
     assert preview["proposed_bc_patch"] == {
+        "email": "new@example.com",
         "phoneNumber": "+502 5950 9758",
         "website": "https://biorgani.tech/",
+        "addressLine1": "NEW ADDRESS",
+        "paymentTermsId": "term-7",
+        "paymentMethodId": "method-credit",
+        "creditLimit": 21400.23,
     }
     assert preview["clickup_sources"]["phone_field"] == "Contact Phone 1"
+    assert preview["clickup_sources"]["email_field"] == "Contact E-mail 1"
+    assert preview["proposed_bc_invoicing_payload"] == {
+        "cfdiCustomerName": "GIAI INNOVATIONS, SOCIEDAD ANONIMA",
+        "vatRegistrationNumber": "96271256",
+        "invoiceEmail": "new@example.com",
+        "correoFactura": "new@example.com",
+        "contactName": "Magdalena Perez",
+        "contactEmail": "new@example.com",
+        "contactPhone": "+502 5950 9758",
+        "paymentTermsCode": "7 DÍAS",
+        "paymentMethodCode": "CREDITO",
+        "cashFlowPaymentTermsCode": "7 DÍAS",
+        "copySellToAddressTo": "Company",
+        "taxIdentificationType": "Legal Entity",
+        "generalBusinessPostingGroupCode": "NAC",
+        "customerPostingGroupCode": "NAC",
+    }
 
 
 def test_prepare_clickup_to_bc_customer_sync_blocks_unconfirmed() -> None:

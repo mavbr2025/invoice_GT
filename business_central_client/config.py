@@ -29,6 +29,7 @@ class Settings:
     timeout_seconds: int
     user_agent: str
     custom_pricing_path: str | None
+    customer_invoicing_sync_path: str | None = None
     default_market: str | None = None
     markets: dict[str, MarketSettings] = field(default_factory=dict)
 
@@ -76,6 +77,9 @@ class Settings:
         company_id = os.getenv("BC_COMPANY_ID", "").strip() or None
         default_market = os.getenv("BC_DEFAULT_MARKET", "").strip().upper() or None
         custom_pricing_path = os.getenv("BC_CUSTOM_PRICING_PATH", "").strip() or None
+        customer_invoicing_sync_path = (
+            os.getenv("BC_CUSTOMER_INVOICING_SYNC_PATH", "").strip() or None
+        )
         markets = cls._load_markets_from_env()
 
         if default_market and default_market not in markets:
@@ -97,6 +101,7 @@ class Settings:
             user_agent=os.getenv("BC_USER_AGENT", "ContractingTool/0.1").strip()
             or "ContractingTool/0.1",
             custom_pricing_path=custom_pricing_path,
+            customer_invoicing_sync_path=customer_invoicing_sync_path,
         )
 
     @staticmethod

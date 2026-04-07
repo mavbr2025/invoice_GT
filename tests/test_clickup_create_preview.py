@@ -8,11 +8,24 @@ class FakeBCClient:
         self.settings = SimpleNamespace(
             tenant_id="tenant-id",
             environment="Production",
+            customer_invoicing_sync_path=None,
         )
 
     def get_company_metadata(self, *, market: str | None = None, company_id: str | None = None):
         if market == "GT":
             return {"name": "MTM_GT_PROD", "displayName": "MTM LOGIX GUATEMALA, SOCIEDAD ANONIMA"}
+        return None
+
+    def resolve_payment_term(self, code_or_name: str, *, market: str | None = None):
+        assert market == "GT"
+        if code_or_name == "7 DÍAS":
+            return {"id": "term-7", "code": "7 DÍAS"}
+        return None
+
+    def resolve_payment_method(self, code_or_name: str, *, market: str | None = None):
+        assert market == "GT"
+        if code_or_name == "CREDITO":
+            return {"id": "method-credit", "code": "CREDITO"}
         return None
 
 
@@ -37,10 +50,11 @@ def test_prepare_clickup_bc_customer_create_preview_prefers_more_legal_name() ->
             "Customer Tax ID": {"value": "304932-9"},
             "Contact E-mail 1": {"value": "operaciones@fpk.com.gt"},
             "Contact Phone 1": {"value": "+502 5511 2349"},
-            "Customer Address": {
-                "value": {
-                    "formatted_address": "11 Calle 5 - 59, Cdad. de Guatemala 01009, Guatemala",
-                }
+            "Customer Address": {"value": "11 Calle 5 - 59, Cdad. de Guatemala 01009, Guatemala"},
+            "Credit Days Required": {"value": "7"},
+            "Credit amount approved": {
+                "id": "54574add-833f-42a5-b027-3b0d64ef95af",
+                "value": "21400.23",
             },
             "Sales email": {"value": None},
             "BC Match Status": {
@@ -68,16 +82,35 @@ def test_prepare_clickup_bc_customer_create_preview_prefers_more_legal_name() ->
     )
 
     assert preview["status"] == "dry_run_ready"
-    assert preview["proposed_bc_payload"]["displayName"] == "FPK Electronicos, S.A."
+    assert preview["proposed_bc_payload"]["displayName"] == "FPK ELECTRONICOS, S.A."
     assert preview["proposed_bc_payload"]["country"] == "GT"
     assert preview["proposed_bc_payload"]["website"] == "https://fpk.com.gt"
-    assert preview["proposed_bc_payload"]["taxRegistrationNumber"] == "304932-9"
+    assert preview["proposed_bc_payload"]["taxRegistrationNumber"] == "3049329"
     assert preview["proposed_bc_payload"]["email"] == "operaciones@fpk.com.gt"
     assert preview["proposed_bc_payload"]["phoneNumber"] == "+502 5511 2349"
+    assert preview["proposed_bc_payload"]["paymentTermsId"] == "term-7"
+    assert preview["proposed_bc_payload"]["paymentMethodId"] == "method-credit"
+    assert preview["proposed_bc_payload"]["creditLimit"] == 21400.23
     assert (
         preview["proposed_bc_payload"]["addressLine1"]
         == "11 Calle 5 - 59, Cdad. de Guatemala 01009, Guatemala"
     )
+    assert preview["proposed_bc_invoicing_payload"] == {
+        "cfdiCustomerName": "FPK ELECTRONICOS, S.A.",
+        "vatRegistrationNumber": "3049329",
+        "invoiceEmail": "operaciones@fpk.com.gt",
+        "correoFactura": "operaciones@fpk.com.gt",
+        "contactName": None,
+        "contactEmail": "operaciones@fpk.com.gt",
+        "contactPhone": "+502 5511 2349",
+        "paymentTermsCode": "7 DÍAS",
+        "paymentMethodCode": "CREDITO",
+        "cashFlowPaymentTermsCode": "7 DÍAS",
+        "copySellToAddressTo": "Company",
+        "taxIdentificationType": "Legal Entity",
+        "generalBusinessPostingGroupCode": "NAC",
+        "customerPostingGroupCode": "NAC",
+    }
     assert preview["expected_clickup_writeback"]["bc_customer_number"] == "<BC response.number>"
     assert (
         preview["expected_clickup_writeback"]["bc_customer_link"]

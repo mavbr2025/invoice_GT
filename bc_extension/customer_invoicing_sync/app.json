@@ -1,0 +1,46 @@
+{
+  "id": "3a0c7b44-6b1e-4a8a-9475-94b0b4157a81",
+  "name": "MTM Customer Invoicing Sync",
+  "publisher": "MTM Logix",
+  "version": "0.1.0.0",
+  "brief": "Custom API surface for ClickUp customer invoicing sync.",
+  "description": "Exposes the non-standard customer invoicing fields needed by the ClickUp to Business Central bridge.",
+  "privacyStatement": "",
+  "EULA": "",
+  "help": "",
+  "url": "",
+  "logo": "",
+  "dependencies": [
+    {
+      "id": "b3780cd9-f8f8-4a83-a4d5-0c2ad87b28af",
+      "name": "Sustainability",
+      "publisher": "Microsoft",
+      "version": "27.5.46862.46929"
+    },
+    {
+      "id": "e1d97edc-c239-46b4-8d84-6368bdf67c8b",
+      "name": "E-Document Core",
+      "publisher": "Microsoft",
+      "version": "27.5.46862.47754"
+    }
+  ],
+  "screenshots": [],
+  "platform": "1.0.0.0",
+  "application": "27.5.46862.47988",
+  "idRanges": [
+    {
+      "from": 71000,
+      "to": 71049
+    }
+  ],
+  "resourceExposurePolicy": {
+    "allowDebugging": true,
+    "allowDownloadingSource": true,
+    "includeSourceInSymbolFile": true
+  },
+  "runtime": "16.0",
+  "target": "Cloud",
+  "features": [
+    "NoImplicitWith"
+  ]
+}

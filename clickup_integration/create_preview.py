@@ -4,6 +4,18 @@ import re
 from typing import Any
 
 from business_central_client.client import BusinessCentralClient
+from clickup_integration.customer_rules import (
+    CLICKUP_CONTACT_NAME_1_FIELD_ID,
+    dropdown_label,
+    field_value,
+    location_formatted_address,
+    normalize_customer_name,
+    normalize_email,
+    normalize_tax_id_digits,
+    payment_method_code_from_credit_terms,
+    resolve_clickup_credit_approved,
+    resolve_clickup_credit_terms,
+)
 from clickup_integration.mapping import is_current_customer_status, resolve_dropdown_field
 from clickup_integration.writeback import (
     BC_FIELD_DEFS,
@@ -80,17 +92,37 @@ def prepare_clickup_bc_customer_create_preview(
         }
 
     custom_fields = clickup_summary.get("custom_fields") or {}
-    legal_name = _field_value(custom_fields, "Business Central Legal Name")
+    legal_name = field_value(custom_fields, field_name="Business Central Legal Name")
     selected_customer_name = _selected_customer_name(custom_fields)
     task_name = (clickup_summary.get("name") or "").strip()
-    display_name = legal_name or _preferred_customer_name(task_name, selected_customer_name)
-    website = _field_value(custom_fields, "Webpage")
-    email = _first_present_field(custom_fields, CLICKUP_EMAIL_FIELD_CANDIDATES)
+    display_name = normalize_customer_name(
+        legal_name or _preferred_customer_name(task_name, selected_customer_name)
+    )
+    website = field_value(custom_fields, field_name="Webpage")
+    email = normalize_email(_first_present_field(custom_fields, CLICKUP_EMAIL_FIELD_CANDIDATES))
     phone = _first_present_field(custom_fields, CLICKUP_PHONE_FIELD_CANDIDATES)
-    tax_id = _first_present_field(custom_fields, CLICKUP_TAX_ID_FIELD_CANDIDATES)
-    address = _location_formatted_address(custom_fields, CLICKUP_ADDRESS_FIELD)
+    contact_name = field_value(
+        custom_fields,
+        field_name="Contact Name 1",
+        field_id=CLICKUP_CONTACT_NAME_1_FIELD_ID,
+    )
+    tax_id = normalize_tax_id_digits(_first_present_field(custom_fields, CLICKUP_TAX_ID_FIELD_CANDIDATES))
+    address = location_formatted_address(custom_fields, field_name=CLICKUP_ADDRESS_FIELD)
+    credit_terms_label = resolve_clickup_credit_terms(custom_fields)
+    credit_approved = resolve_clickup_credit_approved(custom_fields)
     company = bc_client.get_company_metadata(market=market)
     company_name = (company or {}).get("name") or (company or {}).get("displayName")
+    payment_term = (
+        bc_client.resolve_payment_term(credit_terms_label, market=market)
+        if credit_terms_label
+        else None
+    )
+    payment_method_code = payment_method_code_from_credit_terms(credit_terms_label)
+    payment_method = (
+        bc_client.resolve_payment_method(payment_method_code, market=market)
+        if payment_method_code
+        else None
+    )
 
     payload = {
         "displayName": display_name,
@@ -107,6 +139,29 @@ def prepare_clickup_bc_customer_create_preview(
         payload["taxRegistrationNumber"] = tax_id
     if address:
         payload["addressLine1"] = address
+    if payment_term:
+        payload["paymentTermsId"] = payment_term["id"]
+    if payment_method:
+        payload["paymentMethodId"] = payment_method["id"]
+    if credit_approved is not None:
+        payload["creditLimit"] = credit_approved
+
+    invoicing_extension_payload = {
+        "cfdiCustomerName": display_name,
+        "vatRegistrationNumber": tax_id or None,
+        "invoiceEmail": email or None,
+        "correoFactura": email or None,
+        "contactName": contact_name or None,
+        "contactEmail": email or None,
+        "contactPhone": phone or None,
+        "paymentTermsCode": credit_terms_label or None,
+        "paymentMethodCode": payment_method_code or None,
+        "cashFlowPaymentTermsCode": credit_terms_label or None,
+        "copySellToAddressTo": "Company",
+        "taxIdentificationType": "Legal Entity",
+        "generalBusinessPostingGroupCode": "NAC",
+        "customerPostingGroupCode": "NAC",
+    }
 
     warnings: list[str] = []
     missing_recommended_fields: list[str] = []
@@ -129,6 +184,12 @@ def prepare_clickup_bc_customer_create_preview(
         missing_recommended_fields.append("Webpage")
     if not address:
         missing_recommended_fields.append("Customer Address")
+    if not credit_terms_label:
+        missing_recommended_fields.append("Credit Terms")
+    elif not payment_term:
+        warnings.append(f"Could not resolve BC payment terms for ClickUp credit term '{credit_terms_label}'.")
+    if credit_terms_label and not payment_method:
+        warnings.append(f"Could not resolve BC payment method for ClickUp credit term '{credit_terms_label}'.")
 
     if current_match_result:
         match_status = current_match_result.get("status")
@@ -183,8 +244,12 @@ def prepare_clickup_bc_customer_create_preview(
             "phone": phone or None,
             "tax_id": tax_id or None,
             "address": address or None,
+            "credit_terms": credit_terms_label or None,
+            "credit_approved": credit_approved,
+            "contact_name": contact_name or None,
         },
         "proposed_bc_payload": payload,
+        "proposed_bc_invoicing_payload": invoicing_extension_payload,
         "missing_recommended_fields": missing_recommended_fields,
         "warnings": warnings,
         "current_match_result": current_match_result,
@@ -231,6 +296,12 @@ def apply_clickup_bc_customer_create(
         "/companies({company_id})/customers",
         preview["proposed_bc_payload"],
         market=preview["market"],
+    )
+    _apply_customer_invoicing_extension(
+        bc_client=bc_client,
+        customer_id=created_customer["id"],
+        market=preview["market"],
+        invoicing_payload=preview["proposed_bc_invoicing_payload"],
     )
     writeback = prepare_clickup_bc_created_customer_writeback(
         clickup_summary=clickup_summary,
@@ -306,10 +377,7 @@ def prepare_clickup_bc_created_customer_writeback(
 
 
 def _field_value(custom_fields: dict[str, Any], field_name: str) -> str:
-    value = (custom_fields.get(field_name) or {}).get("value")
-    if value is None:
-        return ""
-    return str(value).strip()
+    return field_value(custom_fields, field_name=field_name)
 
 
 def _first_present_field(custom_fields: dict[str, Any], field_names: tuple[str, ...]) -> str:
@@ -321,13 +389,7 @@ def _first_present_field(custom_fields: dict[str, Any], field_names: tuple[str, 
 
 
 def _location_formatted_address(custom_fields: dict[str, Any], field_name: str) -> str:
-    value = (custom_fields.get(field_name) or {}).get("value") or {}
-    if not isinstance(value, dict):
-        return ""
-    formatted_address = value.get("formatted_address")
-    if formatted_address is None:
-        return ""
-    return str(formatted_address).strip()
+    return location_formatted_address(custom_fields, field_name=field_name)
 
 
 def _selected_customer_name(custom_fields: dict[str, Any]) -> str:
@@ -360,3 +422,26 @@ def _resolve_dropdown_option(field: dict[str, Any] | None, label: str) -> dict[s
         if option.get("name") == label:
             return {"label": label, "option_id": option.get("id")}
     return {"label": label, "option_id": None}
+
+
+def _apply_customer_invoicing_extension(
+    *,
+    bc_client: BusinessCentralClient,
+    customer_id: str,
+    market: str,
+    invoicing_payload: dict[str, Any],
+) -> None:
+    path = getattr(bc_client.settings, "customer_invoicing_sync_path", None)
+    if not path:
+        return
+
+    payload = {key: value for key, value in invoicing_payload.items() if value not in {None, ""}}
+    if not payload:
+        return
+
+    bc_client.patch_company_path(
+        path,
+        payload,
+        market=market,
+        customer_id=customer_id,
+    )
