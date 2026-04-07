@@ -17,6 +17,7 @@ from clickup_integration.matcher import match_clickup_customer_to_bc
 
 
 app = FastAPI(title="ClickUp to Business Central Customer Bridge")
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
@@ -53,14 +54,32 @@ async def clickup_customer_sync(
         clickup = ClickUpClient(ClickUpSettings.from_env())
         bc = BusinessCentralClient(BusinessCentralSettings.from_env())
 
-        team_id = os.getenv("CLICKUP_WEBHOOK_TEAM_ID", "").strip() or None
+        team_id = _resolve_clickup_team_id(clickup)
         use_custom_task_ids = _env_bool("CLICKUP_WEBHOOK_CUSTOM_TASK_IDS", default=True)
-        task = clickup.get_task(
+        logger.info(
+            "Processing ClickUp webhook task_id=%s custom_task_ids=%s team_id=%s",
             task_id,
+            use_custom_task_ids,
+            team_id,
+        )
+        task = _fetch_clickup_task_for_webhook(
+            clickup=clickup,
+            task_id=task_id,
             custom_task_ids=use_custom_task_ids,
             team_id=team_id,
-            include_subtasks=False,
         )
+        if task is None:
+            logger.warning(
+                "Ignoring webhook task_id=%s because the ClickUp task could not be fetched.",
+                task_id,
+            )
+            return {
+                "status": "ignored",
+                "reason": "task_lookup_failed",
+                "task_id": task_id,
+                "custom_task_ids": use_custom_task_ids,
+                "team_id": team_id,
+            }
         summary = summarize_task_for_customer_mapping(task)
 
         if not summary.get("sync_eligible"):
@@ -136,6 +155,72 @@ async def clickup_customer_sync(
     except Exception as exc:  # pragma: no cover - exercised in runtime logs
         logger.exception("ClickUp customer webhook failed for task_id=%s", task_id)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+def _fetch_clickup_task_for_webhook(
+    *,
+    clickup: ClickUpClient,
+    task_id: str,
+    custom_task_ids: bool,
+    team_id: str | None,
+) -> dict[str, Any] | None:
+    attempts: list[tuple[bool, str | None]] = []
+    primary_team_id = team_id or clickup.settings.default_workspace_id
+    attempts.append((custom_task_ids, primary_team_id))
+    if custom_task_ids and primary_team_id is None:
+        inferred_team_id = _infer_clickup_team_id(clickup)
+        if inferred_team_id:
+            attempts.append((True, inferred_team_id))
+    if not custom_task_ids:
+        attempts.append((False, None))
+
+    seen: set[tuple[bool, str | None]] = set()
+    for attempt_custom_ids, attempt_team_id in attempts:
+        key = (attempt_custom_ids, attempt_team_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            return clickup.get_task(
+                task_id,
+                custom_task_ids=attempt_custom_ids,
+                team_id=attempt_team_id,
+                include_subtasks=False,
+            )
+        except Exception:
+            logger.exception(
+                "ClickUp task lookup failed for task_id=%s custom_task_ids=%s team_id=%s",
+                task_id,
+                attempt_custom_ids,
+                attempt_team_id,
+            )
+    return None
+
+
+def _resolve_clickup_team_id(clickup: ClickUpClient) -> str | None:
+    explicit_team_id = os.getenv("CLICKUP_WEBHOOK_TEAM_ID", "").strip() or None
+    if explicit_team_id:
+        return explicit_team_id
+    return clickup.settings.default_workspace_id or _infer_clickup_team_id(clickup)
+
+
+def _infer_clickup_team_id(clickup: ClickUpClient) -> str | None:
+    try:
+        workspaces = clickup.get_authorized_workspaces()
+    except Exception:
+        logger.exception("Unable to infer ClickUp team id from authorized workspaces.")
+        return None
+
+    teams = workspaces.get("teams") or []
+    if len(teams) == 1:
+        team_id = teams[0].get("id")
+        return str(team_id) if team_id is not None else None
+
+    default_workspace_id = clickup.settings.default_workspace_id
+    if default_workspace_id:
+        return default_workspace_id
+
+    return None
 
 
 def extract_task_id(payload: dict[str, Any]) -> str | None:
