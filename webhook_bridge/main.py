@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any
 
@@ -16,6 +17,7 @@ from clickup_integration.matcher import match_clickup_customer_to_bc
 
 
 app = FastAPI(title="ClickUp to Business Central Customer Bridge")
+logger = logging.getLogger(__name__)
 
 
 @app.get("/healthz")
@@ -47,87 +49,93 @@ async def clickup_customer_sync(
             "reason": "missing_task_id",
         }
 
-    clickup = ClickUpClient(ClickUpSettings.from_env())
-    bc = BusinessCentralClient(BusinessCentralSettings.from_env())
+    try:
+        clickup = ClickUpClient(ClickUpSettings.from_env())
+        bc = BusinessCentralClient(BusinessCentralSettings.from_env())
 
-    team_id = os.getenv("CLICKUP_WEBHOOK_TEAM_ID", "").strip() or None
-    use_custom_task_ids = _env_bool("CLICKUP_WEBHOOK_CUSTOM_TASK_IDS", default=True)
-    task = clickup.get_task(
-        task_id,
-        custom_task_ids=use_custom_task_ids,
-        team_id=team_id,
-        include_subtasks=False,
-    )
-    summary = summarize_task_for_customer_mapping(task)
+        team_id = os.getenv("CLICKUP_WEBHOOK_TEAM_ID", "").strip() or None
+        use_custom_task_ids = _env_bool("CLICKUP_WEBHOOK_CUSTOM_TASK_IDS", default=True)
+        task = clickup.get_task(
+            task_id,
+            custom_task_ids=use_custom_task_ids,
+            team_id=team_id,
+            include_subtasks=False,
+        )
+        summary = summarize_task_for_customer_mapping(task)
 
-    if not summary.get("sync_eligible"):
-        return {
-            "status": "ignored",
-            "reason": "not_current_customer",
-            "task_id": summary.get("task_id"),
-            "custom_id": summary.get("custom_id"),
-            "task_status": summary.get("status"),
-        }
+        if not summary.get("sync_eligible"):
+            return {
+                "status": "ignored",
+                "reason": "not_current_customer",
+                "task_id": summary.get("task_id"),
+                "custom_id": summary.get("custom_id"),
+                "task_status": summary.get("status"),
+            }
 
-    custom_fields = summary.get("custom_fields") or {}
-    bc_customer_id = (custom_fields.get("Business Central Customer ID") or {}).get("value")
-    bc_match_status = _resolve_clickup_match_status(custom_fields)
+        custom_fields = summary.get("custom_fields") or {}
+        bc_customer_id = (custom_fields.get("Business Central Customer ID") or {}).get("value")
+        bc_match_status = _resolve_clickup_match_status(custom_fields)
 
-    if bc_customer_id and bc_match_status == "Confirmed":
-        result = apply_clickup_to_bc_customer_sync(
+        if bc_customer_id and bc_match_status == "Confirmed":
+            result = apply_clickup_to_bc_customer_sync(
+                clickup_summary=summary,
+                bc_client=bc,
+            )
+            return {
+                "status": "processed",
+                "action": "update_existing_customer",
+                "result": result,
+            }
+
+        match_result = match_clickup_customer_to_bc(clickup_summary=summary, bc_client=bc)
+        result = apply_clickup_bc_customer_create(
             clickup_summary=summary,
+            current_match_result=match_result,
             bc_client=bc,
+        )
+        if result.get("status") != "applied":
+            return {
+                "status": "processed",
+                "action": "create_blocked",
+                "result": result,
+            }
+
+        writeback = result["writeback"]
+        clickup.set_task_custom_field_value(
+            writeback["task_id"],
+            writeback["field_ids"]["number"],
+            writeback["bc_customer_number"],
+        )
+        clickup.set_task_custom_field_value(
+            writeback["task_id"],
+            writeback["field_ids"]["id"],
+            writeback["bc_customer_id"],
+        )
+        clickup.set_task_custom_field_value(
+            writeback["task_id"],
+            writeback["field_ids"]["link"],
+            writeback["bc_customer_link"],
+        )
+        clickup.set_task_custom_field_value(
+            writeback["task_id"],
+            writeback["field_ids"]["legal_name"],
+            writeback["bc_legal_name"],
+        )
+        clickup.set_task_custom_field_value(
+            writeback["task_id"],
+            writeback["field_ids"]["status"],
+            writeback["bc_match_status"],
         )
         return {
             "status": "processed",
-            "action": "update_existing_customer",
+            "action": "create_customer_and_writeback",
             "result": result,
         }
-
-    match_result = match_clickup_customer_to_bc(clickup_summary=summary, bc_client=bc)
-    result = apply_clickup_bc_customer_create(
-        clickup_summary=summary,
-        current_match_result=match_result,
-        bc_client=bc,
-    )
-    if result.get("status") != "applied":
-        return {
-            "status": "processed",
-            "action": "create_blocked",
-            "result": result,
-        }
-
-    writeback = result["writeback"]
-    clickup.set_task_custom_field_value(
-        writeback["task_id"],
-        writeback["field_ids"]["number"],
-        writeback["bc_customer_number"],
-    )
-    clickup.set_task_custom_field_value(
-        writeback["task_id"],
-        writeback["field_ids"]["id"],
-        writeback["bc_customer_id"],
-    )
-    clickup.set_task_custom_field_value(
-        writeback["task_id"],
-        writeback["field_ids"]["link"],
-        writeback["bc_customer_link"],
-    )
-    clickup.set_task_custom_field_value(
-        writeback["task_id"],
-        writeback["field_ids"]["legal_name"],
-        writeback["bc_legal_name"],
-    )
-    clickup.set_task_custom_field_value(
-        writeback["task_id"],
-        writeback["field_ids"]["status"],
-        writeback["bc_match_status"],
-    )
-    return {
-        "status": "processed",
-        "action": "create_customer_and_writeback",
-        "result": result,
-    }
+    except HTTPException:
+        raise
+    except Exception as exc:  # pragma: no cover - exercised in runtime logs
+        logger.exception("ClickUp customer webhook failed for task_id=%s", task_id)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 def extract_task_id(payload: dict[str, Any]) -> str | None:

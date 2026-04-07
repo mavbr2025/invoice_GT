@@ -131,7 +131,8 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
-    settings = ClickUpSettings.from_env()
+    require_oauth = args.command in {"auth-url", "exchange-code", "oauth-listen"}
+    settings = ClickUpSettings.from_env(require_oauth=require_oauth)
 
     if args.command == "auth-url":
         print(build_authorization_url(settings, state=args.state))
