@@ -74,6 +74,32 @@ def location_formatted_address(
     return ""
 
 
+def split_bc_address_lines(value: str, *, line1_limit: int = 100, line2_limit: int = 100) -> tuple[str, str]:
+    normalized = " ".join((value or "").strip().split())
+    if not normalized:
+        return "", ""
+
+    if len(normalized) <= line1_limit:
+        return normalized, ""
+
+    split_at = normalized.rfind(",", 0, line1_limit + 1)
+    if split_at <= 0:
+        split_at = normalized.rfind(" ", 0, line1_limit + 1)
+    if split_at <= 0:
+        split_at = line1_limit
+
+    line1 = normalized[:split_at].rstrip(", ").strip()
+    remainder = normalized[split_at:].lstrip(", ").strip()
+
+    if len(line1) > line1_limit:
+        line1 = line1[:line1_limit].rstrip(", ").strip()
+
+    if len(remainder) > line2_limit:
+        remainder = remainder[:line2_limit].rstrip(", ").strip()
+
+    return line1, remainder
+
+
 def normalize_customer_name(value: str) -> str:
     return " ".join((value or "").strip().upper().split())
 

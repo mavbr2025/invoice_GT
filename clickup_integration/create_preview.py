@@ -15,6 +15,7 @@ from clickup_integration.customer_rules import (
     payment_method_code_from_credit_terms,
     resolve_clickup_credit_approved,
     resolve_clickup_credit_terms,
+    split_bc_address_lines,
 )
 from clickup_integration.mapping import is_current_customer_status, resolve_dropdown_field
 from clickup_integration.writeback import (
@@ -108,6 +109,7 @@ def prepare_clickup_bc_customer_create_preview(
     )
     tax_id = normalize_tax_id_digits(_first_present_field(custom_fields, CLICKUP_TAX_ID_FIELD_CANDIDATES))
     address = location_formatted_address(custom_fields, field_name=CLICKUP_ADDRESS_FIELD)
+    address_line1, address_line2 = split_bc_address_lines(address)
     credit_terms_label = resolve_clickup_credit_terms(custom_fields)
     credit_approved = resolve_clickup_credit_approved(custom_fields)
     company = bc_client.get_company_metadata(market=market)
@@ -137,8 +139,10 @@ def prepare_clickup_bc_customer_create_preview(
         payload["phoneNumber"] = phone
     if tax_id:
         payload["taxRegistrationNumber"] = tax_id
-    if address:
-        payload["addressLine1"] = address
+    if address_line1:
+        payload["addressLine1"] = address_line1
+    if address_line2:
+        payload["addressLine2"] = address_line2
     if payment_term:
         payload["paymentTermsId"] = payment_term["id"]
     if payment_method:

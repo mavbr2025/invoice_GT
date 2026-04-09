@@ -14,6 +14,7 @@ from clickup_integration.customer_rules import (
     payment_method_code_from_credit_terms,
     resolve_clickup_credit_approved,
     resolve_clickup_credit_terms,
+    split_bc_address_lines,
 )
 from clickup_integration.mapping import is_current_customer_status
 from clickup_integration.writeback import _resolve_dropdown_option_name
@@ -112,6 +113,7 @@ def prepare_clickup_to_bc_customer_sync(
         field_value(custom_fields, field_name="Business Central Legal Name")
     )
     clickup_address = location_formatted_address(custom_fields, field_name=CLICKUP_ADDRESS_FIELD)
+    clickup_address_line1, clickup_address_line2 = split_bc_address_lines(clickup_address)
     clickup_credit_terms = resolve_clickup_credit_terms(custom_fields)
     clickup_credit_approved = resolve_clickup_credit_approved(custom_fields)
     payment_term = (
@@ -154,8 +156,11 @@ def prepare_clickup_to_bc_customer_sync(
             "will_update": False,
         },
         "address": {
-            "clickup": clickup_address or None,
-            "bc": (bc_customer.get("addressLine1") or None),
+            "clickup": " | ".join(part for part in [clickup_address_line1, clickup_address_line2] if part) or None,
+            "bc": " | ".join(
+                part for part in [bc_customer.get("addressLine1") or "", bc_customer.get("addressLine2") or ""]
+                if part
+            ) or None,
             "will_update": False,
         },
         "payment_terms": {
@@ -195,8 +200,13 @@ def prepare_clickup_to_bc_customer_sync(
         proposed_updates["taxRegistrationNumber"] = clickup_tax_id
         comparison["tax_id"]["will_update"] = True
 
-    if clickup_address and clickup_address != (bc_customer.get("addressLine1") or ""):
-        proposed_updates["addressLine1"] = clickup_address
+    bc_address_line1 = (bc_customer.get("addressLine1") or "").strip()
+    bc_address_line2 = (bc_customer.get("addressLine2") or "").strip()
+    if clickup_address_line1 and (
+        clickup_address_line1 != bc_address_line1 or clickup_address_line2 != bc_address_line2
+    ):
+        proposed_updates["addressLine1"] = clickup_address_line1
+        proposed_updates["addressLine2"] = clickup_address_line2
         comparison["address"]["will_update"] = True
 
     if payment_term and payment_term["id"] != (bc_customer.get("paymentTermsId") or ""):
