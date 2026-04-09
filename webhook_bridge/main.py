@@ -15,6 +15,7 @@ from clickup_integration.config import ClickUpSettings
 from clickup_integration.create_preview import apply_clickup_bc_customer_create
 from clickup_integration.mapping import summarize_task_for_customer_mapping
 from clickup_integration.matcher import match_clickup_customer_to_bc
+from clickup_integration.writeback import prepare_clickup_bc_writeback
 
 
 app = FastAPI(title="ClickUp to Business Central Customer Bridge")
@@ -124,6 +125,26 @@ async def clickup_customer_sync(
             return response
 
         match_result = match_clickup_customer_to_bc(clickup_summary=summary, bc_client=bc)
+        if match_result.get("status") == "likely_match":
+            writeback = prepare_clickup_bc_writeback(
+                clickup_summary=summary,
+                match_result=match_result,
+                bc_client=bc,
+            )
+            _apply_clickup_customer_writeback(clickup=clickup, writeback=writeback)
+            response = {
+                "status": "processed",
+                "action": "link_existing_customer",
+                "result": {
+                    "status": "applied",
+                    "message": "Linked the existing Business Central customer back into ClickUp.",
+                    "match_result": match_result,
+                    "writeback": writeback,
+                },
+            }
+            _log_webhook_result(task_id=task_id, result=response)
+            return response
+
         result = apply_clickup_bc_customer_create(
             clickup_summary=summary,
             current_match_result=match_result,
@@ -139,31 +160,7 @@ async def clickup_customer_sync(
             return response
 
         writeback = result["writeback"]
-        clickup.set_task_custom_field_value(
-            writeback["task_id"],
-            writeback["field_ids"]["number"],
-            writeback["bc_customer_number"],
-        )
-        clickup.set_task_custom_field_value(
-            writeback["task_id"],
-            writeback["field_ids"]["id"],
-            writeback["bc_customer_id"],
-        )
-        clickup.set_task_custom_field_value(
-            writeback["task_id"],
-            writeback["field_ids"]["link"],
-            writeback["bc_customer_link"],
-        )
-        clickup.set_task_custom_field_value(
-            writeback["task_id"],
-            writeback["field_ids"]["legal_name"],
-            writeback["bc_legal_name"],
-        )
-        clickup.set_task_custom_field_value(
-            writeback["task_id"],
-            writeback["field_ids"]["status"],
-            writeback["bc_match_status"],
-        )
+        _apply_clickup_customer_writeback(clickup=clickup, writeback=writeback)
         response = {
             "status": "processed",
             "action": "create_customer_and_writeback",
@@ -323,6 +320,34 @@ def _extract_webhook_token(
     if value.lower().startswith("bearer "):
         return value[7:].strip()
     return value
+
+
+def _apply_clickup_customer_writeback(*, clickup: ClickUpClient, writeback: dict[str, Any]) -> None:
+    clickup.set_task_custom_field_value(
+        writeback["task_id"],
+        writeback["field_ids"]["number"],
+        writeback["bc_customer_number"],
+    )
+    clickup.set_task_custom_field_value(
+        writeback["task_id"],
+        writeback["field_ids"]["id"],
+        writeback["bc_customer_id"],
+    )
+    clickup.set_task_custom_field_value(
+        writeback["task_id"],
+        writeback["field_ids"]["link"],
+        writeback["bc_customer_link"],
+    )
+    clickup.set_task_custom_field_value(
+        writeback["task_id"],
+        writeback["field_ids"]["legal_name"],
+        writeback["bc_legal_name"],
+    )
+    clickup.set_task_custom_field_value(
+        writeback["task_id"],
+        writeback["field_ids"]["status"],
+        writeback["bc_match_status"],
+    )
 
 
 def _log_webhook_result(*, task_id: str | None, result: dict[str, Any]) -> None:
