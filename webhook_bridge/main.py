@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 from typing import Any
+from urllib.parse import unquote
 
 from fastapi import FastAPI, Header, HTTPException, Request
 
@@ -27,11 +28,16 @@ def healthz() -> dict[str, str]:
 
 
 @app.post("/clickup/webhooks/customer-sync")
+@app.post("/clickup/webhooks/{webhook_path:path}")
 async def clickup_customer_sync(
     request: Request,
+    webhook_path: str = "",
     x_webhook_token: str | None = Header(default=None, alias="X-Webhook-Token"),
     authorization: str | None = Header(default=None, alias="Authorization"),
 ) -> dict[str, Any]:
+    if webhook_path and not webhook_path.startswith("customer-sync"):
+        raise HTTPException(status_code=404, detail="Not Found")
+
     expected_token = os.getenv("CLICKUP_WEBHOOK_TOKEN", "").strip()
     if not expected_token:
         raise HTTPException(status_code=500, detail="CLICKUP_WEBHOOK_TOKEN is not configured.")
@@ -43,7 +49,10 @@ async def clickup_customer_sync(
         raise HTTPException(status_code=401, detail="Invalid webhook token.")
 
     payload = await _safe_json(request)
-    task_id = extract_task_id(payload)
+    task_id = extract_task_id(payload) or extract_task_id_from_path(
+        request.url.path,
+        base_path="/clickup/webhooks/customer-sync",
+    )
     if not task_id:
         result = {
             "status": "ignored",
@@ -246,6 +255,25 @@ def extract_task_id(payload: dict[str, Any]) -> str | None:
         if candidate is not None and str(candidate).strip():
             return str(candidate).strip()
     return None
+
+
+def extract_task_id_from_path(path: str, *, base_path: str) -> str | None:
+    normalized_path = path.rstrip("/")
+    normalized_base = base_path.rstrip("/")
+    if not normalized_path.startswith(normalized_base):
+        return None
+
+    suffix = normalized_path[len(normalized_base) :].lstrip("/")
+    if not suffix:
+        return None
+
+    first_segment = suffix.split("/", 1)[0].strip()
+    if not first_segment:
+        return None
+
+    # ClickUp may double-encode path variables; decode conservatively.
+    decoded_segment = unquote(unquote(first_segment)).strip()
+    return decoded_segment or None
 
 
 def _resolve_clickup_match_status(custom_fields: dict[str, Any]) -> str | None:

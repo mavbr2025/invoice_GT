@@ -3,6 +3,7 @@ from webhook_bridge.main import (
     _fetch_clickup_task_for_webhook,
     _infer_clickup_team_id,
     extract_task_id,
+    extract_task_id_from_path,
 )
 
 
@@ -22,6 +23,24 @@ def test_extract_task_id_returns_none_when_missing() -> None:
 
 def test_extract_task_id_returns_none_for_empty_payload() -> None:
     assert extract_task_id({}) is None
+
+
+def test_extract_task_id_from_path_supports_clickup_dynamic_segments() -> None:
+    path = "/clickup/webhooks/customer-sync86e0ty7pg/OPERA%2520LOGISTICA/1775697146706/"
+    assert (
+        extract_task_id_from_path(path, base_path="/clickup/webhooks/customer-sync")
+        == "86e0ty7pg"
+    )
+
+
+def test_extract_task_id_from_path_returns_none_for_other_routes() -> None:
+    assert (
+        extract_task_id_from_path(
+            "/clickup/webhooks/not-customer-sync/123",
+            base_path="/clickup/webhooks/customer-sync",
+        )
+        is None
+    )
 
 
 class _FakeClickUpClient:
