@@ -45,10 +45,12 @@ async def clickup_customer_sync(
     payload = await _safe_json(request)
     task_id = extract_task_id(payload)
     if not task_id:
-        return {
+        result = {
             "status": "ignored",
             "reason": "missing_task_id",
         }
+        _log_webhook_result(task_id=None, result=result)
+        return result
 
     try:
         clickup = ClickUpClient(ClickUpSettings.from_env())
@@ -73,23 +75,27 @@ async def clickup_customer_sync(
                 "Ignoring webhook task_id=%s because the ClickUp task could not be fetched.",
                 task_id,
             )
-            return {
+            result = {
                 "status": "ignored",
                 "reason": "task_lookup_failed",
                 "task_id": task_id,
                 "custom_task_ids": use_custom_task_ids,
                 "team_id": team_id,
             }
+            _log_webhook_result(task_id=task_id, result=result)
+            return result
         summary = summarize_task_for_customer_mapping(task)
 
         if not summary.get("sync_eligible"):
-            return {
+            result = {
                 "status": "ignored",
                 "reason": "not_current_customer",
                 "task_id": summary.get("task_id"),
                 "custom_id": summary.get("custom_id"),
                 "task_status": summary.get("status"),
             }
+            _log_webhook_result(task_id=task_id, result=result)
+            return result
 
         custom_fields = summary.get("custom_fields") or {}
         bc_customer_id = (custom_fields.get("Business Central Customer ID") or {}).get("value")
@@ -100,11 +106,13 @@ async def clickup_customer_sync(
                 clickup_summary=summary,
                 bc_client=bc,
             )
-            return {
+            response = {
                 "status": "processed",
                 "action": "update_existing_customer",
                 "result": result,
             }
+            _log_webhook_result(task_id=task_id, result=response)
+            return response
 
         match_result = match_clickup_customer_to_bc(clickup_summary=summary, bc_client=bc)
         result = apply_clickup_bc_customer_create(
@@ -113,11 +121,13 @@ async def clickup_customer_sync(
             bc_client=bc,
         )
         if result.get("status") != "applied":
-            return {
+            response = {
                 "status": "processed",
                 "action": "create_blocked",
                 "result": result,
             }
+            _log_webhook_result(task_id=task_id, result=response)
+            return response
 
         writeback = result["writeback"]
         clickup.set_task_custom_field_value(
@@ -145,11 +155,13 @@ async def clickup_customer_sync(
             writeback["field_ids"]["status"],
             writeback["bc_match_status"],
         )
-        return {
+        response = {
             "status": "processed",
             "action": "create_customer_and_writeback",
             "result": result,
         }
+        _log_webhook_result(task_id=task_id, result=response)
+        return response
     except HTTPException:
         raise
     except Exception as exc:  # pragma: no cover - exercised in runtime logs
@@ -283,3 +295,15 @@ def _extract_webhook_token(
     if value.lower().startswith("bearer "):
         return value[7:].strip()
     return value
+
+
+def _log_webhook_result(*, task_id: str | None, result: dict[str, Any]) -> None:
+    logger.info(
+        "Webhook result task_id=%s status=%s action=%s reason=%s result_status=%s result_message=%s",
+        task_id,
+        result.get("status"),
+        result.get("action"),
+        result.get("reason"),
+        (result.get("result") or {}).get("status") if isinstance(result.get("result"), dict) else None,
+        (result.get("result") or {}).get("message") if isinstance(result.get("result"), dict) else None,
+    )
