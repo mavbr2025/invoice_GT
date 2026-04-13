@@ -192,6 +192,73 @@ class BusinessCentralClient:
 
         return self._request("POST", url, json=payload)
 
+    def find_entities(
+        self,
+        entity_name: str,
+        *,
+        filters: str,
+        top: int = 1,
+        company_id: str | None = None,
+        market: str | None = None,
+    ) -> list[dict[str, Any]]:
+        return self.get_entities(
+            entity_name,
+            top=top,
+            filters=filters,
+            company_id=company_id,
+            market=market,
+        ).get("value", [])
+
+    def create_sales_invoice(
+        self,
+        payload: dict[str, Any],
+        *,
+        company_id: str | None = None,
+        market: str | None = None,
+    ) -> dict[str, Any]:
+        return self.post_to_company(
+            "/companies({company_id})/salesInvoices",
+            payload,
+            company_id=company_id,
+            market=market,
+        )
+
+    def create_sales_invoice_line(
+        self,
+        sales_invoice_id: str,
+        payload: dict[str, Any],
+        *,
+        company_id: str | None = None,
+        market: str | None = None,
+    ) -> dict[str, Any]:
+        return self.post_to_company(
+            f"/companies({{company_id}})/salesInvoices({sales_invoice_id})/salesInvoiceLines",
+            payload,
+            company_id=company_id,
+            market=market,
+        )
+
+    def resolve_account_by_number(
+        self,
+        account_number: str,
+        *,
+        market: str | None = None,
+    ) -> dict[str, Any] | None:
+        needle = (account_number or "").strip()
+        if not needle:
+            return None
+
+        escaped = needle.replace("'", "''")
+        rows = self.find_entities(
+            "accounts",
+            filters=f"number eq '{escaped}'",
+            top=1,
+            market=market,
+        )
+        if not rows:
+            return None
+        return rows[0]
+
     def _expand_relative_path(self, path: str, company_id: str, **path_params: str) -> str:
         cleaned = path if path.startswith("/") else f"/{path}"
         rendered = cleaned.format(company_id=company_id, **path_params)

@@ -43,6 +43,84 @@ class ClickUpClient:
             f"https://api.clickup.com/api/v2/list/{list_id}/field",
         )
 
+    def get_list_tasks(
+        self,
+        list_id: str,
+        *,
+        archived: bool = False,
+        include_closed: bool = False,
+        page: int = 0,
+    ) -> dict[str, Any]:
+        return self._request(
+            "GET",
+            f"https://api.clickup.com/api/v2/list/{list_id}/task",
+            params={
+                "archived": str(archived).lower(),
+                "include_closed": str(include_closed).lower(),
+                "page": page,
+            },
+        )
+
+    def update_task(
+        self,
+        task_id: str,
+        *,
+        status: str | None = None,
+        custom_task_ids: bool = False,
+        team_id: str | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {}
+        if status is not None:
+            payload["status"] = status
+
+        params: dict[str, Any] = {
+            "custom_task_ids": str(custom_task_ids).lower(),
+        }
+        if custom_task_ids and team_id:
+            params["team_id"] = team_id
+
+        return self._request(
+            "PUT",
+            f"https://api.clickup.com/api/v2/task/{task_id}",
+            params=params,
+            json=payload or None,
+        )
+
+    def create_task(
+        self,
+        list_id: str,
+        *,
+        name: str,
+        description: str | None = None,
+        status: str | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {"name": name}
+        if description is not None:
+            payload["description"] = description
+        if status is not None:
+            payload["status"] = status
+        return self._request(
+            "POST",
+            f"https://api.clickup.com/api/v2/list/{list_id}/task",
+            json=payload,
+        )
+
+    def create_task_comment(
+        self,
+        task_id: str,
+        *,
+        comment_text: str,
+        notify_all: bool = False,
+    ) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"https://api.clickup.com/api/v2/task/{task_id}/comment",
+            json={
+                "comment_text": comment_text,
+                "notify_all": notify_all,
+            },
+        )
+
     def set_task_custom_field_value(
         self,
         task_id: str,

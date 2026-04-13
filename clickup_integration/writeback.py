@@ -25,6 +25,15 @@ BC_FIELD_DEFS = {
     },
 }
 
+BC_INVOICE_FIELD_DEFS = {
+    "invoice_number": {
+        "name": "Business Central Invoice Number",
+    },
+    "invoice_id": {
+        "name": "Business Central Invoice ID",
+    },
+}
+
 
 def build_bc_customer_url(
     *,
@@ -109,6 +118,53 @@ def prepare_clickup_bc_writeback(
             "legal_name": field_lookup["legal_name"]["id"],
             "status": field_lookup["status"]["id"],
         },
+    }
+
+
+def prepare_clickup_bc_invoice_writeback(
+    *,
+    clickup_summary: dict[str, Any],
+    created_invoice: dict[str, Any],
+    invoice_field_names: dict[str, str] | None = None,
+    require_all_fields: bool = False,
+) -> dict[str, Any]:
+    custom_fields = clickup_summary.get("custom_fields") or {}
+    field_names = {
+        "invoice_number": BC_INVOICE_FIELD_DEFS["invoice_number"]["name"],
+        "invoice_id": BC_INVOICE_FIELD_DEFS["invoice_id"]["name"],
+    }
+    if invoice_field_names:
+        field_names.update(invoice_field_names)
+
+    field_lookup = {
+        key: _find_clickup_field(
+            custom_fields,
+            field_name=field_names[key],
+            fallback_field_id=BC_INVOICE_FIELD_DEFS[key].get("id"),
+        )
+        for key in BC_INVOICE_FIELD_DEFS
+    }
+
+    missing_fields = [
+        field_names[key]
+        for key, details in field_lookup.items()
+        if details is None
+    ]
+    if require_all_fields and missing_fields:
+        missing = ", ".join(missing_fields)
+        raise ValueError(f"ClickUp task is missing required invoice write-back fields: {missing}")
+
+    field_ids = {
+        key: details["id"]
+        for key, details in field_lookup.items()
+        if details is not None and details.get("id")
+    }
+    return {
+        "task_id": clickup_summary["task_id"],
+        "bc_invoice_number": created_invoice.get("number"),
+        "bc_invoice_id": created_invoice.get("id"),
+        "field_ids": field_ids,
+        "missing_fields": missing_fields,
     }
 
 

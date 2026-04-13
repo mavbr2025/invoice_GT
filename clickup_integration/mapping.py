@@ -27,6 +27,8 @@ def summarize_task_for_customer_mapping(task: dict[str, Any]) -> dict[str, Any]:
         "url": task.get("url"),
         "date_created": task.get("date_created"),
         "date_updated": task.get("date_updated"),
+        "due_date": task.get("due_date"),
+        "start_date": task.get("start_date"),
         "workspace": {
             "id": (space_info.get("id") if isinstance(space_info, dict) else None),
             "name": (space_info.get("name") if isinstance(space_info, dict) else None),

@@ -33,6 +33,14 @@ def test_extract_task_id_from_path_supports_clickup_dynamic_segments() -> None:
     )
 
 
+def test_extract_task_id_from_invoice_path_supports_clickup_dynamic_segments() -> None:
+    path = "/clickup/webhooks/invoice-sync86e0ty7pg/OPERA%2520LOGISTICA/1775697146706/"
+    assert (
+        extract_task_id_from_path(path, base_path="/clickup/webhooks/invoice-sync")
+        == "86e0ty7pg"
+    )
+
+
 def test_extract_task_id_from_path_returns_none_for_other_routes() -> None:
     assert (
         extract_task_id_from_path(

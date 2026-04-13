@@ -1,6 +1,10 @@
 from types import SimpleNamespace
 
-from clickup_integration.writeback import build_bc_customer_url, prepare_clickup_bc_writeback
+from clickup_integration.writeback import (
+    build_bc_customer_url,
+    prepare_clickup_bc_invoice_writeback,
+    prepare_clickup_bc_writeback,
+)
 
 
 class FakeBCClient:
@@ -72,3 +76,22 @@ def test_prepare_clickup_bc_writeback() -> None:
     assert payload["bc_match_status"] == "opt-2"
     assert payload["field_ids"]["link"] == "field-link"
     assert payload["field_ids"]["legal_name"] == "field-legal-name"
+
+
+def test_prepare_clickup_bc_invoice_writeback() -> None:
+    payload = prepare_clickup_bc_invoice_writeback(
+        clickup_summary={
+            "task_id": "task-1",
+            "custom_fields": {
+                "Business Central Invoice Number": {"id": "field-invoice-number"},
+                "Business Central Invoice ID": {"id": "field-invoice-id"},
+            },
+        },
+        created_invoice={"id": "invoice-id-1", "number": "SI-0001"},
+    )
+
+    assert payload["bc_invoice_number"] == "SI-0001"
+    assert payload["bc_invoice_id"] == "invoice-id-1"
+    assert payload["field_ids"]["invoice_number"] == "field-invoice-number"
+    assert payload["field_ids"]["invoice_id"] == "field-invoice-id"
+    assert payload["missing_fields"] == []
