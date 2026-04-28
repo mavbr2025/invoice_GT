@@ -2,9 +2,62 @@ from clickup_integration.config import ClickUpSettings
 from webhook_bridge.main import (
     _fetch_clickup_task_for_webhook,
     _infer_clickup_team_id,
+    app,
     extract_task_id,
     extract_task_id_from_path,
 )
+
+
+def test_customer_webhook_accepts_task_id_path_before_auth(monkeypatch) -> None:
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("CLICKUP_WEBHOOK_TOKEN", "expected-token")
+    response = TestClient(app).post(
+        "/clickup/webhooks/customer-sync/2w8majz/",
+        headers={"Authorization": "Bearer wrong-token"},
+        json={},
+    )
+
+    assert response.status_code == 401
+
+
+def test_customer_webhook_accepts_clickup_appended_task_id_before_auth(monkeypatch) -> None:
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("CLICKUP_WEBHOOK_TOKEN", "expected-token")
+    response = TestClient(app).post(
+        "/clickup/webhooks/customer-sync2w8majz/",
+        headers={"Authorization": "Bearer wrong-token"},
+        json={},
+    )
+
+    assert response.status_code == 401
+
+
+def test_invoice_webhook_accepts_task_id_path_before_auth(monkeypatch) -> None:
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("CLICKUP_WEBHOOK_TOKEN", "expected-token")
+    response = TestClient(app).post(
+        "/clickup/webhooks/invoice-sync/2w8majz/",
+        headers={"Authorization": "Bearer wrong-token"},
+        json={},
+    )
+
+    assert response.status_code == 401
+
+
+def test_invoice_webhook_accepts_clickup_appended_task_id_before_auth(monkeypatch) -> None:
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("CLICKUP_WEBHOOK_TOKEN", "expected-token")
+    response = TestClient(app).post(
+        "/clickup/webhooks/invoice-sync2w8majz/",
+        headers={"Authorization": "Bearer wrong-token"},
+        json={},
+    )
+
+    assert response.status_code == 401
 
 
 def test_extract_task_id_prefers_explicit_task_id_keys() -> None:

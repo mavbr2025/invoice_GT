@@ -116,6 +116,7 @@ async def whatsapp_inbound(
 
 
 @app.post("/clickup/webhooks/customer-sync")
+@app.post("/clickup/webhooks/customer-sync{webhook_path:path}")
 @app.post("/clickup/webhooks/customer-sync/{webhook_path:path}")
 async def clickup_customer_sync(
     request: Request,
@@ -123,9 +124,6 @@ async def clickup_customer_sync(
     x_webhook_token: str | None = Header(default=None, alias="X-Webhook-Token"),
     authorization: str | None = Header(default=None, alias="Authorization"),
 ) -> dict[str, Any]:
-    if webhook_path and not webhook_path.startswith("customer-sync"):
-        raise HTTPException(status_code=404, detail="Not Found")
-
     expected_token = os.getenv("CLICKUP_WEBHOOK_TOKEN", "").strip()
     if not expected_token:
         raise HTTPException(status_code=500, detail="CLICKUP_WEBHOOK_TOKEN is not configured.")
@@ -263,6 +261,7 @@ async def clickup_customer_sync(
 
 
 @app.post("/clickup/webhooks/invoice-sync")
+@app.post("/clickup/webhooks/invoice-sync{webhook_path:path}")
 @app.post("/clickup/webhooks/invoice-sync/{webhook_path:path}")
 async def clickup_invoice_sync(
     request: Request,
@@ -270,9 +269,6 @@ async def clickup_invoice_sync(
     x_webhook_token: str | None = Header(default=None, alias="X-Webhook-Token"),
     authorization: str | None = Header(default=None, alias="Authorization"),
 ) -> dict[str, Any]:
-    if webhook_path and not webhook_path.startswith("invoice-sync"):
-        raise HTTPException(status_code=404, detail="Not Found")
-
     expected_token = os.getenv("CLICKUP_WEBHOOK_TOKEN", "").strip()
     if not expected_token:
         raise HTTPException(status_code=500, detail="CLICKUP_WEBHOOK_TOKEN is not configured.")
