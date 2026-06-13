@@ -102,6 +102,10 @@ page 71000 "MTM Customer Invoicing API"
                 {
                     Caption = 'Customer Posting Group Code';
                 }
+                field(vatBusinessPostingGroupCode; Rec."VAT Bus. Posting Group")
+                {
+                    Caption = 'VAT Business Posting Group Code';
+                }
                 field(creditLimitLcy; Rec."Credit Limit (LCY)")
                 {
                     Caption = 'Credit Limit (LCY)';

@@ -1,0 +1,138 @@
+{
+  "market": "GT",
+  "source_workbook": "/Users/mario/Documents/Contracting_Tool/output/MTM_CFO_BC_ClickUp_Connection_Matrix_2026.xlsx",
+  "source_sheet": "Connection Matrix",
+  "line_type": "Item",
+  "skip_zero_amounts": true,
+  "amount_basis": "pre_tax_unit_price",
+  "mappings": [
+    {
+      "charge_name": "Freight (Ocean/Truck/Air)",
+      "clickup_field_id": "c8935d06-7f43-46c5-a1ef-444314dca0e9",
+      "clickup_field_name": "Freight (Ocean/Truck/Air)",
+      "bc_item_number": "INT000000026",
+      "bc_description": "TRANSPORTE MARITIMO",
+      "tax_group": "NO IVA"
+    },
+    {
+      "charge_name": "Origin Charges",
+      "clickup_field_id": "fe89391f-35e7-429e-a03c-b19f529d79e5",
+      "clickup_field_name": "Origin Charges",
+      "bc_item_number": "INT000000011",
+      "bc_description": "ORIGIN CHARGES",
+      "tax_group": "NO IVA"
+    },
+    {
+      "charge_name": "Inland origin",
+      "clickup_field_id": "6907a317-75fd-4c28-a683-adab0cf212dd",
+      "clickup_field_name": "Inland origin",
+      "bc_item_number": "INT000000017",
+      "bc_description": "INLAND ORGIN",
+      "tax_group": "NO IVA"
+    },
+    {
+      "charge_name": "Customs Broker Origin",
+      "clickup_field_id": "fd301630-ec8b-4b30-b011-41412aa02576",
+      "clickup_field_name": "Customs Broker Origin",
+      "bc_item_number": "INT000000016",
+      "bc_description": "CUSTOM AGENT",
+      "tax_group": "NO IVA"
+    },
+    {
+      "charge_name": "Emergency Surcharge",
+      "clickup_field_id": "eed2e3aa-781e-4bbf-86a4-3353fc7d057d",
+      "clickup_field_name": "Emergency Surcharge",
+      "bc_item_number": "INT000000032",
+      "bc_description": "EMERGENCY SURCHARGE",
+      "tax_group": "NO IVA"
+    },
+    {
+      "charge_name": "Doc Fee Origin",
+      "clickup_field_id": "32194420-8e3e-43ec-ae44-a74397cffacd",
+      "clickup_field_name": "Doc Fee Origin",
+      "bc_item_number": "INT000000022",
+      "bc_description": "DOCUMENT FEE",
+      "tax_group": "NO IVA"
+    },
+    {
+      "charge_name": "Inspection at Origin",
+      "clickup_field_id": "e38dd1cf-5e2d-4ef0-90d3-a12131f31b49",
+      "clickup_field_name": "Inspection at Origin",
+      "bc_item_number": "INT000000031",
+      "bc_description": "INSPECCIONES EN ORIGEN",
+      "tax_group": "NO IVA"
+    },
+    {
+      "charge_name": "Cargo Maritime Insurance",
+      "clickup_field_id": "c9738c8c-ab09-4161-9fce-6d7258477ec5",
+      "clickup_field_name": "Cargo Maritime Insurance",
+      "bc_item_number": "INT000000007",
+      "bc_description": "Insurance",
+      "tax_group": "NO IVA"
+    },
+    {
+      "charge_name": "Destination Charges",
+      "clickup_field_id": "4ad13e04-a8c6-4069-9e6b-f5e4b6b734bd",
+      "clickup_field_name": "Destination Charges",
+      "bc_item_number": "NAT00000028",
+      "bc_description": "DESTINATION CHARGES",
+      "tax_group": "IVA 12"
+    },
+    {
+      "charge_name": "Doc Fee Destination",
+      "clickup_field_id": "dc5001e4-cb9c-4cab-a306-b97faa323753",
+      "clickup_field_name": "Doc Fee Destination",
+      "bc_item_number": "NAT00000009",
+      "bc_description": "DOCUMENT FEE",
+      "tax_group": "IVA 12"
+    },
+    {
+      "charge_name": "CT / Handling Fee",
+      "clickup_field_id": "4c3fb385-15cf-4250-9e3c-e1c93434cb7f",
+      "clickup_field_name": "CT / Handling Fee",
+      "bc_item_number": "NAT00000010",
+      "bc_description": "HANDLING FEE",
+      "tax_group": "IVA 12"
+    },
+    {
+      "charge_name": "Customs Broker",
+      "clickup_field_id": "c88a27b6-6325-44bb-983a-3948017061b4",
+      "clickup_field_name": "Customs Broker",
+      "bc_item_number": "NAT00000036",
+      "bc_description": "AGENTE ADUANAL",
+      "tax_group": "IVA 12"
+    },
+    {
+      "charge_name": "Inland Destination",
+      "clickup_field_id": "76c18eed-e9c0-4a0e-94ae-7f3d41a33970",
+      "clickup_field_name": "Inland Destination",
+      "bc_item_number": "NAT00000031",
+      "bc_description": "INLAND EN DESTINO",
+      "tax_group": "IVA 12"
+    },
+    {
+      "charge_name": "Almacenaje al cliente (USD)",
+      "clickup_field_id": "16edb6b2-ba0c-4a1e-94f0-f3f511d2f647",
+      "clickup_field_name": "Almacenaje al cliente (USD)",
+      "bc_item_number": "NAT00000034",
+      "bc_description": "ALMACENAJES EN PUERTO",
+      "tax_group": "IVA 12"
+    },
+    {
+      "charge_name": "D&D al cliente (USD)",
+      "clickup_field_id": "e0dce9a5-00f2-4aa1-b563-b997c29136bc",
+      "clickup_field_name": "D&D al cliente (USD)",
+      "bc_item_number": "NAT00000033",
+      "bc_description": "DEMORA",
+      "tax_group": "IVA 12"
+    },
+    {
+      "charge_name": "Custody",
+      "clickup_field_id": "2a995022-8edb-4516-9e45-e36f0eaac4d1",
+      "clickup_field_name": "Custody",
+      "bc_item_number": "NAT00000014",
+      "bc_description": "CUSTODIA Y SEGURIDAD EN DESTINO",
+      "tax_group": "IVA 12"
+    }
+  ]
+}

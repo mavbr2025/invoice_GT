@@ -1,5 +1,8 @@
 codeunit 71001 "MTM Customer Invoicing Mgt"
 {
+    Permissions =
+        tabledata "Sales Invoice Line" = rm;
+
     procedure LoadCustomFieldValues(Customer: Record Customer; var CfdiCustomerName: Text[250]; var CorreoFactura: Text[250]; var CopySellToAddressTo: Text[50]; var TaxIdentificationType: Text[50]; var CashFlowPaymentTermsCode: Code[20])
     var
         CustomerRef: RecordRef;
@@ -34,6 +37,29 @@ codeunit 71001 "MTM Customer Invoicing Mgt"
         CustomerRef.SetTable(Customer);
     end;
 
+    procedure SyncPostedInvoiceLineDescriptions(DocumentNo: Code[20]): Integer
+    var
+        SalesInvoiceLine: Record "Sales Invoice Line";
+        SalesInvoiceLineRef: RecordRef;
+        UpdatedCount: Integer;
+    begin
+        SalesInvoiceLine.SetRange("Document No.", DocumentNo);
+        SalesInvoiceLine.SetFilter(Description, '<>%1', '');
+
+        if not SalesInvoiceLine.FindSet(true) then
+            exit(0);
+
+        repeat
+            SalesInvoiceLineRef.GetTable(SalesInvoiceLine);
+            if WriteMissingTextField(SalesInvoiceLineRef, GetSalesInvoiceLineDescriptionXLFieldNo(), CopyStr(SalesInvoiceLine.Description, 1, 2000)) then begin
+                SalesInvoiceLineRef.Modify(true);
+                UpdatedCount += 1;
+            end;
+        until SalesInvoiceLine.Next() = 0;
+
+        exit(UpdatedCount);
+    end;
+
     local procedure ReadTextField(var CustomerRef: RecordRef; FieldNo: Integer): Text
     var
         FieldRef: FieldRef;
@@ -56,6 +82,26 @@ codeunit 71001 "MTM Customer Invoicing Mgt"
         if not TryGetFieldRef(CustomerRef, FieldNo, FieldRef) then
             exit;
         FieldRef.Value := Value;
+    end;
+
+    local procedure WriteMissingTextField(var RecordRef: RecordRef; FieldNo: Integer; Value: Text): Boolean
+    var
+        FieldRef: FieldRef;
+    begin
+        if FieldNo <= 0 then
+            exit(false);
+
+        if Value = '' then
+            exit(false);
+
+        if not TryGetFieldRef(RecordRef, FieldNo, FieldRef) then
+            exit(false);
+
+        if Format(FieldRef.Value) <> '' then
+            exit(false);
+
+        FieldRef.Value := Value;
+        exit(true);
     end;
 
     [TryFunction]
@@ -87,5 +133,10 @@ codeunit 71001 "MTM Customer Invoicing Mgt"
     local procedure GetCashFlowPaymentTermsCodeFieldNo(): Integer
     begin
         exit(840);
+    end;
+
+    local procedure GetSalesInvoiceLineDescriptionXLFieldNo(): Integer
+    begin
+        exit(50100);
     end;
 }

@@ -14,9 +14,14 @@ from clickup_integration.bc_sync import apply_clickup_to_bc_customer_sync
 from clickup_integration.client import ClickUpClient
 from clickup_integration.config import ClickUpSettings
 from clickup_integration.create_preview import apply_clickup_bc_customer_create
+from clickup_integration.invoice_delivery import (
+    finalize_clickup_issued_invoices,
+    validate_invoice_pdf_field_on_task,
+)
 from clickup_integration.invoice_sync import (
     InvoiceAutomationSettings,
-    apply_clickup_bc_sales_invoice,
+    issue_clickup_bc_sales_invoice,
+    prepare_clickup_bc_sales_invoice_preview,
     prepare_clickup_invoice_status_transition,
 )
 from clickup_integration.mapping import summarize_task_for_customer_mapping
@@ -39,6 +44,29 @@ logger = logging.getLogger(__name__)
 @app.get("/healthz")
 def healthz() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/clickup/webhooks/invoice-sync/readiness")
+def invoice_sync_readiness() -> dict[str, Any]:
+    try:
+        settings = InvoiceAutomationSettings.from_env()
+    except Exception as exc:
+        logger.exception("Invoice bridge readiness check failed.")
+        return {
+            "status": "not_ready",
+            "message": str(exc),
+        }
+
+    return {
+        "status": "ready",
+        "market": settings.supported_market,
+        "currency": settings.supported_currency,
+        "apply_mode": _env_bool("CLICKUP_INVOICE_WEBHOOK_APPLY", default=False),
+        "ready_status": settings.ready_status,
+        "ok_finops_status": settings.ok_finops_status,
+        "charge_mapping_count": len(settings.charge_mappings),
+        "line_type": "Item" if settings.charge_mappings else "Account",
+    }
 
 
 @app.post("/whatsapp/webhooks/inbound")
@@ -324,17 +352,25 @@ async def clickup_invoice_sync(
 
         summary = summarize_task_for_customer_mapping(task)
         actions: list[str] = []
+        apply_mode = _env_bool("CLICKUP_INVOICE_WEBHOOK_APPLY", default=False)
         transition_result = prepare_clickup_invoice_status_transition(
             clickup_summary=summary,
             settings=settings,
         )
-        if transition_result.get("status") == "ready_to_update":
-            clickup.update_task(
-                summary["task_id"],
-                status=settings.ready_status,
-                custom_task_ids=use_custom_task_ids,
-                team_id=team_id,
-            )
+        if transition_result.get("status") == "ready_to_update" and apply_mode:
+            if transition_result.get("status_field_id") and transition_result.get("target_status_option_id"):
+                clickup.set_task_custom_field_value(
+                    summary["task_id"],
+                    transition_result["status_field_id"],
+                    transition_result["target_status_option_id"],
+                )
+            else:
+                clickup.update_task(
+                    summary["task_id"],
+                    status=settings.ready_status,
+                    custom_task_ids=use_custom_task_ids,
+                    team_id=team_id,
+                )
             actions.append("update_status")
             logger.info(
                 "Updated ClickUp task_id=%s status from %s to %s",
@@ -342,25 +378,119 @@ async def clickup_invoice_sync(
                 summary.get("status"),
                 settings.ready_status,
             )
-            summary = {**summary, "status": settings.ready_status}
+            summary = _with_updated_custom_field_value(
+                {**summary, "status": settings.ready_status},
+                field_id=transition_result.get("status_field_id"),
+                value=transition_result.get("target_status_option_id"),
+            )
+        elif transition_result.get("status") == "ready_to_update":
+            actions.append("would_update_status")
+            summary = _with_updated_custom_field_value(
+                {**summary, "status": settings.ready_status},
+                field_id=transition_result.get("status_field_id"),
+                value=transition_result.get("target_status_option_id"),
+            )
 
         invoice_result: dict[str, Any] | None = None
-        if _status_equals(summary.get("status"), settings.ready_status):
-            invoice_result = apply_clickup_bc_sales_invoice(
-                clickup_summary=summary,
-                bc_client=bc,
-                settings=settings,
-            )
-            actions.append("create_sales_invoice")
-            if invoice_result.get("status") == "applied":
-                invoice_writeback = invoice_result.get("invoice_writeback") or {}
-                if invoice_writeback.get("field_ids"):
-                    _apply_clickup_invoice_writeback(clickup=clickup, writeback=invoice_writeback)
-                    actions.append("writeback_invoice")
+        if transition_result.get("status") in {"ready_to_update", "already_ready_to_invoice"}:
+            if apply_mode:
+                try:
+                    validate_invoice_pdf_field_on_task(summary)
+                except Exception as exc:
+                    invoice_result = {
+                        "status": "missing_invoice_pdf_field",
+                        "message": str(exc),
+                        "market": summary.get("market"),
+                        "task_status": summary.get("status"),
+                    }
+                    error_comment = _write_invoice_error_comment(
+                        clickup=clickup,
+                        clickup_summary=summary,
+                        stage="validacion_clickup",
+                        invoice_result=invoice_result,
+                    )
+                    if error_comment:
+                        invoice_result = {**invoice_result, "error_comment": error_comment}
+                    actions.append("validate_invoice_pdf_field")
+                    if error_comment:
+                        actions.append("comment_invoice_error")
+                    response_payload = {
+                        "mode": "apply",
+                        "action": ",".join(actions) or "none",
+                        "transition": transition_result,
+                        "result": invoice_result,
+                    }
+                    return response_payload
+
+                invoice_result = issue_clickup_bc_sales_invoice(
+                    clickup_summary=summary,
+                    bc_client=bc,
+                    settings=settings,
+                )
+                actions.extend(invoice_result.get("completed_stages") or ["create_sales_invoice"])
+                if invoice_result.get("status") == "applied":
+                    try:
+                        delivery_result = finalize_clickup_issued_invoices(
+                            clickup=clickup,
+                            bc_client=bc,
+                            clickup_summary=summary,
+                            invoice_result=invoice_result,
+                            settings=settings,
+                            workspace_id=team_id,
+                            mark_status=True,
+                        )
+                    except Exception as exc:
+                        logger.exception(
+                            "ClickUp invoice delivery failed after BC invoice creation task_id=%s",
+                            summary.get("task_id"),
+                        )
+                        invoice_result = {
+                            **invoice_result,
+                            "status": "failed_post_creation",
+                            "message": str(exc),
+                        }
+                        error_comment = _write_invoice_error_comment(
+                            clickup=clickup,
+                            clickup_summary=summary,
+                            stage="entrega_clickup",
+                            invoice_result=invoice_result,
+                        )
+                        if error_comment:
+                            invoice_result = {**invoice_result, "error_comment": error_comment}
+                            actions.append("comment_invoice_error")
+                    else:
+                        invoice_result = {
+                            **invoice_result,
+                            "delivery": delivery_result,
+                            "final_status_update": delivery_result.get("final_status_update"),
+                        }
+                        actions.append("upload_invoice_pdfs")
+                        actions.append("comment_invoice_details")
+                        actions.append("set_facturada_status")
+                elif invoice_result.get("status") not in {"applied", "dry_run_ready"}:
+                    error_comment = _write_invoice_error_comment(
+                        clickup=clickup,
+                        clickup_summary=summary,
+                        stage=invoice_result.get("failed_stage") or "creacion_bc",
+                        invoice_result=invoice_result,
+                    )
+                    if error_comment:
+                        invoice_result = {**invoice_result, "error_comment": error_comment}
+                        actions.append("comment_invoice_error")
+            else:
+                invoice_result = prepare_clickup_bc_sales_invoice_preview(
+                    clickup_summary=summary,
+                    bc_client=bc,
+                    settings=settings,
+                )
+                actions.append("preview_sales_invoice")
             response = {
                 "status": "processed",
+                "mode": "apply" if apply_mode else "dry_run",
                 "action": ",".join(actions),
-                "transition": transition_result if actions and "update_status" in actions else None,
+                "transition": transition_result
+                if actions and ("update_status" in actions or "would_update_status" in actions)
+                else None,
                 "result": invoice_result,
             }
             _log_webhook_result(task_id=task_id, result=response)
@@ -381,6 +511,96 @@ async def clickup_invoice_sync(
     except Exception as exc:  # pragma: no cover - exercised in runtime logs
         logger.exception("ClickUp invoice webhook failed for task_id=%s", task_id)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+def _write_invoice_error_comment(
+    *,
+    clickup: ClickUpClient,
+    clickup_summary: dict[str, Any],
+    stage: str,
+    invoice_result: dict[str, Any],
+) -> dict[str, Any] | None:
+    comment_text = _build_invoice_error_comment(
+        clickup_summary=clickup_summary,
+        stage=stage,
+        invoice_result=invoice_result,
+    )
+    try:
+        return clickup.create_task_comment(
+            clickup_summary["task_id"],
+            comment_text=comment_text,
+            notify_all=False,
+        )
+    except Exception:
+        logger.exception(
+            "Could not write Spanish invoice error comment task_id=%s stage=%s",
+            clickup_summary.get("task_id"),
+            stage,
+        )
+        return None
+
+
+def _build_invoice_error_comment(
+    *,
+    clickup_summary: dict[str, Any],
+    stage: str,
+    invoice_result: dict[str, Any],
+) -> str:
+    stage_label = {
+        "validacion_clickup": "VALIDACION DE CLICKUP ANTES DE CREAR LA FACTURA",
+        "creacion_bc": "CREACION DE LA FACTURA EN BUSINESS CENTRAL",
+        "create_sales_invoice": "CREACION DE LA FACTURA EN BUSINESS CENTRAL",
+        "post_sales_invoice": "REGISTRO/POSTEO DE LA FACTURA EN BUSINESS CENTRAL",
+        "sync_fel_descriptions": "SINCRONIZACION DE DESCRIPCIONES FEL",
+        "stamp_fel_invoice": "TIMBRADO FEL/SAT",
+        "entrega_clickup": "ENTREGA DE PDF Y REFERENCIAS EN CLICKUP",
+    }.get(stage, stage.replace("_", " ").upper())
+    status = str(invoice_result.get("status") or "error").strip()
+    message = _truncate_comment_value(str(invoice_result.get("message") or "Sin detalle tecnico."))
+    reference = str(
+        invoice_result.get("reference")
+        or clickup_summary.get("custom_id")
+        or clickup_summary.get("name")
+        or clickup_summary.get("task_id")
+        or ""
+    ).strip()
+    invoice_numbers = _invoice_numbers_from_result(invoice_result)
+    invoice_line = f"\nFACTURAS BC: {', '.join(invoice_numbers)}" if invoice_numbers else ""
+
+    return (
+        "ERROR EN PROCESO DE FACTURACION\n"
+        f"TAREA: {reference or 'NO DISPONIBLE'}\n"
+        f"ETAPA: {stage_label}\n"
+        f"ESTADO DEL PROCESO: {status}\n"
+        f"DETALLE: {message}"
+        f"{invoice_line}\n\n"
+        "ACCION REQUERIDA: REVISAR EL DETALLE, CORREGIR LA CAUSA Y REEJECUTAR EL WEBHOOK "
+        "O ESCALAR A SISTEMAS. LA AUTOMATIZACION NO DEBE CONSIDERARSE COMPLETA HASTA QUE "
+        "LOS PDF ESTEN EN EL CAMPO INVOICE TO CLIENT, EL COMENTARIO CON REFERENCIAS BC EXISTA "
+        "Y EL ESTATUS QUEDE EN FACTURADA."
+    )
+
+
+def _invoice_numbers_from_result(invoice_result: dict[str, Any]) -> list[str]:
+    numbers: list[str] = []
+    for key in ("created_invoices", "posted_invoices"):
+        for invoice in invoice_result.get(key) or []:
+            if isinstance(invoice, dict) and invoice.get("number"):
+                numbers.append(str(invoice["number"]))
+    for invoice in invoice_result.get("finalized_invoices") or []:
+        if not isinstance(invoice, dict):
+            continue
+        number = invoice.get("number") or (invoice.get("posted_invoice_after_stamp") or {}).get("number")
+        if number:
+            numbers.append(str(number))
+    return list(dict.fromkeys(numbers))
+
+
+def _truncate_comment_value(value: str, *, max_length: int = 1200) -> str:
+    cleaned = " ".join(value.split())
+    if len(cleaned) <= max_length:
+        return cleaned
+    return cleaned[: max_length - 3].rstrip() + "..."
 
 
 def _fetch_clickup_task_for_webhook(
@@ -589,6 +809,24 @@ def _apply_clickup_invoice_writeback(*, clickup: ClickUpClient, writeback: dict[
             invoice_id_field_id,
             writeback["bc_invoice_id"],
         )
+
+
+def _with_updated_custom_field_value(
+    summary: dict[str, Any],
+    *,
+    field_id: str | int | None,
+    value: str | int | None,
+) -> dict[str, Any]:
+    if field_id is None or value is None:
+        return summary
+    custom_fields = summary.get("custom_fields") or {}
+    updated_fields = {}
+    for field_name, details in custom_fields.items():
+        if details.get("id") == field_id:
+            updated_fields[field_name] = {**details, "value": value}
+        else:
+            updated_fields[field_name] = details
+    return {**summary, "custom_fields": updated_fields}
 
 
 def _log_webhook_result(*, task_id: str | None, result: dict[str, Any]) -> None:

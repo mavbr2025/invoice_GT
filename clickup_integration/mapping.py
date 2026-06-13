@@ -7,12 +7,18 @@ def summarize_task_for_customer_mapping(task: dict[str, Any]) -> dict[str, Any]:
     custom_fields = {}
     for field in task.get("custom_fields", []):
         field_name = field.get("name") or field.get("id")
-        custom_fields[field_name] = {
+        field_summary = {
             "id": field.get("id"),
             "type": field.get("type"),
             "value": field.get("value"),
             "type_config": field.get("type_config"),
         }
+        if field_name in custom_fields and _prefer_existing_custom_field(
+            existing=custom_fields[field_name],
+            candidate=field_summary,
+        ):
+            continue
+        custom_fields[field_name] = field_summary
 
     list_info = task.get("list") or {}
     folder_info = task.get("folder") or {}
@@ -72,6 +78,20 @@ def resolve_dropdown_field(field: dict[str, Any] | None) -> dict[str, Any] | Non
             return option
 
     return None
+
+
+def _prefer_existing_custom_field(*, existing: dict[str, Any], candidate: dict[str, Any]) -> bool:
+    existing_has_value = existing.get("value") is not None and str(existing.get("value")).strip() != ""
+    candidate_has_value = candidate.get("value") is not None and str(candidate.get("value")).strip() != ""
+    if existing_has_value != candidate_has_value:
+        return existing_has_value
+
+    existing_is_dropdown = existing.get("type") in {"drop_down", "labels"}
+    candidate_is_dropdown = candidate.get("type") in {"drop_down", "labels"}
+    if existing_is_dropdown != candidate_is_dropdown:
+        return existing_is_dropdown
+
+    return True
 
 
 def resolve_market_code_from_owner_country(owner_country: dict[str, Any] | None) -> str | None:

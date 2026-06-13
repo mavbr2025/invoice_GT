@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import mimetypes
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -50,15 +52,21 @@ class ClickUpClient:
         archived: bool = False,
         include_closed: bool = False,
         page: int = 0,
+        subtasks: bool = False,
+        query: str | None = None,
     ) -> dict[str, Any]:
-        return self._request(
-            "GET",
-            f"https://api.clickup.com/api/v2/list/{list_id}/task",
-            params={
+        params: dict[str, Any] = {
                 "archived": str(archived).lower(),
                 "include_closed": str(include_closed).lower(),
                 "page": page,
-            },
+                "subtasks": str(subtasks).lower(),
+        }
+        if query:
+            params["query"] = query
+        return self._request(
+            "GET",
+            f"https://api.clickup.com/api/v2/list/{list_id}/task",
+            params=params,
         )
 
     def update_task(
@@ -66,12 +74,18 @@ class ClickUpClient:
         task_id: str,
         *,
         status: str | None = None,
+        name: str | None = None,
+        description: str | None = None,
         custom_task_ids: bool = False,
         team_id: str | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {}
         if status is not None:
             payload["status"] = status
+        if name is not None:
+            payload["name"] = name
+        if description is not None:
+            payload["description"] = description
 
         params: dict[str, Any] = {
             "custom_task_ids": str(custom_task_ids).lower(),
@@ -121,6 +135,43 @@ class ClickUpClient:
             },
         )
 
+    def attach_file_to_task(
+        self,
+        task_id: str,
+        local_path: str | Path,
+        *,
+        file_name: str | None = None,
+        mime_type: str | None = None,
+        custom_task_ids: bool = False,
+        team_id: str | None = None,
+    ) -> dict[str, Any]:
+        path = Path(local_path)
+        upload_name = file_name or path.name
+        upload_mime_type = (
+            mime_type or mimetypes.guess_type(upload_name)[0] or "application/octet-stream"
+        )
+        params: dict[str, Any] = {
+            "custom_task_ids": str(custom_task_ids).lower(),
+        }
+        if custom_task_ids and team_id:
+            params["team_id"] = team_id
+        headers = {
+            **self._authorization_headers(),
+            "Accept": "application/json",
+        }
+        with path.open("rb") as handle:
+            response = requests.post(
+                f"https://api.clickup.com/api/v2/task/{task_id}/attachment",
+                headers=headers,
+                params=params,
+                files={"attachment": (upload_name, handle, upload_mime_type)},
+                timeout=120,
+            )
+        response.raise_for_status()
+        if not response.content:
+            return {}
+        return response.json()
+
     def set_task_custom_field_value(
         self,
         task_id: str,
@@ -137,6 +188,43 @@ class ClickUpClient:
             f"https://api.clickup.com/api/v2/task/{task_id}/field/{field_id}",
             json=payload,
         )
+
+    def upload_custom_field_attachment(
+        self,
+        workspace_id: str,
+        field_id: str,
+        local_path: str | Path,
+        *,
+        file_name: str | None = None,
+        mime_type: str | None = None,
+    ) -> dict[str, Any]:
+        path = Path(local_path)
+        upload_name = file_name or path.name
+        upload_mime_type = (
+            mime_type or mimetypes.guess_type(upload_name)[0] or "application/octet-stream"
+        )
+        headers = {
+            **self._authorization_headers(),
+            "Accept": "application/json",
+        }
+        with path.open("rb") as handle:
+            response = requests.post(
+                f"https://api.clickup.com/api/v3/workspaces/{workspace_id}/custom_fields/{field_id}/attachments",
+                headers=headers,
+                files={"attachment": (upload_name, handle, upload_mime_type)},
+                data={"filename": upload_name},
+                timeout=120,
+            )
+        response.raise_for_status()
+        return response.json()
+
+    def set_task_file_custom_field_attachments(
+        self,
+        task_id: str,
+        field_id: str,
+        attachment_ids: list[str],
+    ) -> dict[str, Any]:
+        return self.set_task_custom_field_value(task_id, field_id, attachment_ids)
 
     def get_workspace_custom_fields(self, workspace_id: str) -> dict[str, Any]:
         return self._request(

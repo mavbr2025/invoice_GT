@@ -1,0 +1,197 @@
+from types import SimpleNamespace
+
+import pytest
+
+from clickup_integration.invoice_delivery import finalize_clickup_issued_invoices
+from clickup_integration.invoice_sync import InvoiceAutomationSettings
+
+
+class FakeClickUp:
+    def __init__(self) -> None:
+        self.settings = SimpleNamespace(default_workspace_id="8451352")
+        self.uploads: list[dict[str, object]] = []
+        self.file_field_updates: list[dict[str, object]] = []
+        self.comments: list[dict[str, object]] = []
+        self.field_updates: list[dict[str, object]] = []
+
+    def upload_custom_field_attachment(
+        self,
+        workspace_id,
+        field_id,
+        local_path,
+        *,
+        file_name=None,
+        mime_type=None,
+    ):
+        upload = {
+            "id": f"attachment-{len(self.uploads) + 1}",
+            "workspace_id": workspace_id,
+            "field_id": field_id,
+            "file_name": file_name,
+            "mime_type": mime_type,
+        }
+        self.uploads.append(upload)
+        return upload
+
+    def set_task_file_custom_field_attachments(self, task_id, field_id, attachment_ids):
+        update = {"task_id": task_id, "field_id": field_id, "attachment_ids": attachment_ids}
+        self.file_field_updates.append(update)
+        return update
+
+    def create_task_comment(self, task_id, *, comment_text, notify_all=False):
+        comment = {"task_id": task_id, "comment_text": comment_text, "notify_all": notify_all}
+        self.comments.append(comment)
+        return comment
+
+    def set_task_custom_field_value(self, task_id, field_id, value):
+        update = {"task_id": task_id, "field_id": field_id, "value": value}
+        self.field_updates.append(update)
+        return update
+
+
+class FakeBC:
+    def get_sales_invoice_pdf_content(self, sales_invoice_id, *, company_id=None, market=None):
+        return b"%PDF-1.4 invoice"
+
+    def get_company_metadata(self, *, company_id=None, market=None):
+        return {"name": "MTM_GT_PROD"}
+
+    def build_sales_invoice_url(self, *, company_name, invoice_number):
+        return f"https://bc.example/{company_name}/{invoice_number}"
+
+
+def make_settings() -> InvoiceAutomationSettings:
+    return InvoiceAutomationSettings(
+        ready_status="Listo para facturar",
+        ok_finops_status="OK Finops",
+        eta_horizon_days=10,
+        supported_market="GT",
+        supported_currency="USD",
+        invoice_status_field_names=("Estatus de facturación (USD)/",),
+        eta_field_names=("ETA",),
+        currency_field_names=("Invoice Currency",),
+        reference_field_names=("Reference",),
+        invoice_date_field_names=("Invoice Date",),
+        posting_date_field_names=("Posting Date",),
+        due_date_field_names=("Due Date",),
+        freight_field_names=("Freight",),
+        inland_field_names=("Inland",),
+        destination_field_names=("Destination Charges",),
+        bc_customer_id_field_names=("Business Central Customer ID",),
+        bc_customer_number_field_names=("Business Central Customer Number",),
+        bc_invoice_number_field_names=("Business Central Invoice Number",),
+        bc_invoice_id_field_names=("Business Central Invoice ID",),
+        freight_account_number=None,
+        inland_account_number=None,
+        destination_account_number=None,
+    )
+
+
+def clickup_summary() -> dict:
+    return {
+        "task_id": "task-1",
+        "custom_fields": {
+            "Invoice to Client": {
+                "id": "5d67859a-1ae0-4cda-9f57-2a89bf1ff259",
+                "value": None,
+            },
+            "Estatus de facturación (USD)/": {
+                "id": "invoice-status",
+                "value": 1,
+                "type_config": {
+                    "options": [
+                        {"id": "ready", "name": "Listo para facturar", "orderindex": 1},
+                        {"id": "invoiced", "name": "Facturada", "orderindex": 2},
+                    ]
+                },
+            },
+        },
+    }
+
+
+def finalized_invoice_result(*, stamp_status: str = "Stamp Received") -> dict:
+    return {
+        "status": "applied",
+        "market": "GT",
+        "created_invoices": [
+            {
+                "id": "draft-int-id",
+                "number": "GTFV00000059",
+                "externalDocumentNumber": "MTMLXGT-24096-INT",
+                "invoice_group": "INT",
+            }
+        ],
+        "finalized_invoices": [
+            {
+                "invoice_group": "INT",
+                "externalDocumentNumber": "MTMLXGT-24096-INT",
+                "posted_invoice_after_stamp": {
+                    "id": "bc-int-id",
+                    "number": "GTFVR0003923",
+                    "externalDocumentNumber": "MTMLXGT-24096-INT",
+                },
+                "custom_api_row_after_stamp": {
+                    "electronicDocumentStatus": stamp_status,
+                },
+            },
+            {
+                "invoice_group": "NAT",
+                "externalDocumentNumber": "MTMLXGT-24096-NAT",
+                "posted_invoice_after_stamp": {
+                    "id": "bc-nat-id",
+                    "number": "GTFVR0003924",
+                    "externalDocumentNumber": "MTMLXGT-24096-NAT",
+                },
+                "custom_api_row_after_stamp": {
+                    "electronicDocumentStatus": stamp_status,
+                },
+            },
+        ],
+    }
+
+
+def test_finalize_clickup_issued_invoices_accepts_finalized_stamped_invoice_result() -> None:
+    clickup = FakeClickUp()
+
+    result = finalize_clickup_issued_invoices(
+        clickup=clickup,
+        bc_client=FakeBC(),
+        clickup_summary=clickup_summary(),
+        invoice_result=finalized_invoice_result(),
+        settings=make_settings(),
+        workspace_id="8451352",
+        mark_status=True,
+    )
+
+    assert [upload["file_name"] for upload in clickup.uploads] == [
+        "MTMLXGT-24096-INT.pdf",
+        "MTMLXGT-24096-NAT.pdf",
+    ]
+    assert clickup.file_field_updates == [
+        {
+            "task_id": "task-1",
+            "field_id": "5d67859a-1ae0-4cda-9f57-2a89bf1ff259",
+            "attachment_ids": ["attachment-1", "attachment-2"],
+        }
+    ]
+    assert "GTFVR0003923" in result["comment_text"]
+    assert "GTFVR0003924" in result["comment_text"]
+    assert "GTFV00000059" not in result["comment_text"]
+    assert result["final_status_update"] == {
+        "task_id": "task-1",
+        "field_id": "invoice-status",
+        "value": "invoiced",
+    }
+
+
+def test_finalize_clickup_issued_invoices_blocks_unstamped_finalized_result() -> None:
+    with pytest.raises(ValueError, match="Stamp Received"):
+        finalize_clickup_issued_invoices(
+            clickup=FakeClickUp(),
+            bc_client=FakeBC(),
+            clickup_summary=clickup_summary(),
+            invoice_result=finalized_invoice_result(stamp_status="Stamp Pending"),
+            settings=make_settings(),
+            workspace_id="8451352",
+            mark_status=True,
+        )

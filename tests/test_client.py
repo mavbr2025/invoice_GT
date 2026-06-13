@@ -63,3 +63,96 @@ def test_resolve_market_company_id() -> None:
     assert client._resolve_company_id(company_id=None, market="GT") == "gt-company-id"
     assert client._resolve_company_id(company_id=None, market="MX") == "mx-company-id"
     assert client._resolve_company_id(company_id="override-id", market="GT") == "override-id"
+
+
+def test_resolve_customer_by_name_accepts_unique_contained_match() -> None:
+    class CustomerClient(BusinessCentralClient):
+        def get_entities(self, entity_name, *, top=None, filters=None, company_id=None, market=None):
+            assert entity_name == "customers"
+            assert top == 1000
+            assert market == "GT"
+            return {
+                "value": [
+                    {
+                        "id": "customer-1",
+                        "number": "C0001",
+                        "displayName": "MASESA, SOCIEDAD ANONIMA",
+                        "email": "",
+                        "website": "",
+                    },
+                    {
+                        "id": "customer-2",
+                        "number": "C0002",
+                        "displayName": "OTHER CUSTOMER",
+                        "email": "",
+                        "website": "",
+                    },
+                ]
+            }
+
+    client = CustomerClient(make_settings())
+
+    assert client.resolve_customer_by_name("MASESA", market="GT") == {
+        "id": "customer-1",
+        "number": "C0001",
+        "displayName": "MASESA, SOCIEDAD ANONIMA",
+        "email": "",
+        "website": "",
+    }
+
+
+def test_resolve_customer_by_name_accepts_unique_email_or_website_match() -> None:
+    class CustomerClient(BusinessCentralClient):
+        def get_entities(self, entity_name, *, top=None, filters=None, company_id=None, market=None):
+            assert entity_name == "customers"
+            return {
+                "value": [
+                    {
+                        "id": "customer-1",
+                        "number": "C0001",
+                        "displayName": "MOTOCOM, SOCIEDAD ANONIMA",
+                        "email": "kevin.ortigoza@masesa.com",
+                        "website": "https://masesa.com",
+                    },
+                    {
+                        "id": "customer-2",
+                        "number": "C0002",
+                        "displayName": "OTHER CUSTOMER",
+                        "email": "",
+                        "website": "",
+                    },
+                ]
+            }
+
+    client = CustomerClient(make_settings())
+
+    assert client.resolve_customer_by_name("MASESA", market="GT") == {
+        "id": "customer-1",
+        "number": "C0001",
+        "displayName": "MOTOCOM, SOCIEDAD ANONIMA",
+        "email": "kevin.ortigoza@masesa.com",
+        "website": "https://masesa.com",
+    }
+
+
+def test_resolve_customer_by_name_matches_sa_to_sociedad_anonima() -> None:
+    class CustomerClient(BusinessCentralClient):
+        def get_entities(self, entity_name, *, top=None, filters=None, company_id=None, market=None):
+            assert entity_name == "customers"
+            return {
+                "value": [
+                    {
+                        "id": "customer-1",
+                        "number": "C00058",
+                        "displayName": "SUPER AUTO REPUESTOS, SOCIEDAD ANONIMA",
+                    }
+                ]
+            }
+
+    client = CustomerClient(make_settings())
+
+    assert client.resolve_customer_by_name("Super Auto Repuestos S.A.", market="GT") == {
+        "id": "customer-1",
+        "number": "C00058",
+        "displayName": "SUPER AUTO REPUESTOS, SOCIEDAD ANONIMA",
+    }

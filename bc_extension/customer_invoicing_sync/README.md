@@ -48,6 +48,38 @@ BC_CUSTOMER_INVOICING_SYNC_PATH=/api/mtmlogix/customerSync/v1.0/companies({compa
 
 `{customer_id}` must be the BC customer `SystemId`.
 
+## Invoice layout audit API paths
+
+Version `0.1.1.0` adds read-only API pages for invoice layout diagnostics. These pages are intended to answer which report/layout Business Central will use for direct print/email paths, without sending any invoice.
+
+Expected paths after publishing:
+
+```text
+/api/mtmlogix/layoutAudit/v1.0/companies({company_id})/customerLayoutSetup
+/api/mtmlogix/layoutAudit/v1.0/companies({company_id})/documentSendingProfiles
+/api/mtmlogix/layoutAudit/v1.0/companies({company_id})/reportSelections
+/api/mtmlogix/layoutAudit/v1.0/companies({company_id})/customReportSelections
+/api/mtmlogix/layoutAudit/v1.0/companies({company_id})/reportLayoutSelections
+/api/mtmlogix/layoutAudit/v1.0/companies({company_id})/reportLayouts
+```
+
+For the COTTONTEXTILE invoice issue, the checks are:
+
+1. `customerLayoutSetup`: filter `number eq 'C00081'` and confirm the customer `documentSendingProfile`.
+2. `documentSendingProfiles`: inspect the customer profile, or the default profile if the customer field is blank. Confirm email attachment is PDF and that the profile does not force a separate electronic-only output.
+3. `customReportSelections`: filter `sourceNo eq 'C00081'`. If invoice rows exist, these override the global sales report selection for this customer.
+4. `reportSelections`: inspect rows where `usage` is invoice-related and `useForEmailAttachment` is true. This identifies the report and layout used when BC sends an invoice by email.
+5. `reportLayoutSelections`: match the selected `reportId` and company `MTM_GT_PROD`; confirm the default layout description is the corrected invoice layout.
+6. `reportLayouts`: match the selected `reportId` and `reportLayoutName` to confirm the actual layout exists, is installed, and is not obsolete.
+
+The layout is not correct if any effective invoice email attachment row points to an older layout that still renders:
+
+- missing customer NIT
+- `FACTRURA`
+- the bank/payment footer
+
+The layout is also not correct if BC API PDF rendering fails with the payment information error observed during the May 2026 audit.
+
 ## Before publishing
 
 1. Open this folder in VS Code with the AL Language extension installed.
@@ -78,3 +110,10 @@ BC_CUSTOMER_INVOICING_SYNC_PATH=/api/mtmlogix/customerSync/v1.0/companies({compa
 ## Important note
 
 This scaffold now includes the field numbers captured from your tenant. Keep using Page Inspection as the source of truth if you move to another localization, environment, or app version.
+
+`SendFelInvoice` is intentionally disabled. The legacy provider send routine renders and sends a Jasper/FEL PDF that bypasses the MTM Business Central invoice layout. The supported customer-delivery path is:
+
+1. post the sales invoice in Business Central,
+2. call `StampFelInvoice` for FEL/SAT stamping without customer email,
+3. download `salesInvoices({id})/pdfDocument`,
+4. upload that PDF to ClickUp and send it through the approved MTM workflow.

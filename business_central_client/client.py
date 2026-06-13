@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+import unicodedata
 from typing import Any
 
 import requests
@@ -48,6 +50,27 @@ class BusinessCentralClient:
         if not response.content:
             return {}
         return response.json()
+
+    def _request_bytes(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> bytes:
+        request_headers = self._headers()
+        if headers:
+            request_headers.update(headers)
+        response = self.session.request(
+            method=method,
+            url=url,
+            headers=request_headers,
+            params=params,
+            timeout=self.settings.timeout_seconds,
+        )
+        response.raise_for_status()
+        return response.content
 
     def get_environments(self) -> dict[str, Any]:
         return self._request("GET", self.settings.environments_url)
@@ -113,6 +136,224 @@ class BusinessCentralClient:
 
         url = f"{self.settings.api_base_url}/companies({company})/{entity_name}({entity_id})"
         return self._request("GET", url)
+
+    def get_posted_sales_invoices(
+        self,
+        *,
+        top: int | None = None,
+        filters: str | None = None,
+        company_id: str | None = None,
+        market: str | None = None,
+    ) -> list[dict[str, Any]]:
+        return self.get_entities(
+            "salesInvoices",
+            top=top,
+            filters=filters,
+            company_id=company_id,
+            market=market,
+        ).get("value", [])
+
+    def get_posted_sales_invoice_by_number(
+        self,
+        invoice_number: str,
+        *,
+        company_id: str | None = None,
+        market: str | None = None,
+    ) -> dict[str, Any] | None:
+        escaped = invoice_number.replace("'", "''")
+        rows = self.find_entities(
+            "salesInvoices",
+            filters=f"number eq '{escaped}'",
+            top=2,
+            company_id=company_id,
+            market=market,
+        )
+        if not rows:
+            return None
+        if len(rows) > 1:
+            raise ValueError(f"More than one Business Central sales invoice matched {invoice_number}.")
+        return rows[0]
+
+    def get_posted_sales_invoice_by_external_document_number(
+        self,
+        external_document_number: str,
+        *,
+        company_id: str | None = None,
+        market: str | None = None,
+    ) -> dict[str, Any] | None:
+        escaped = external_document_number.replace("'", "''")
+        rows = self.find_entities(
+            "salesInvoices",
+            filters=f"externalDocumentNumber eq '{escaped}'",
+            top=2,
+            company_id=company_id,
+            market=market,
+        )
+        if not rows:
+            return None
+        if len(rows) > 1:
+            raise ValueError(
+                f"More than one Business Central sales invoice matched external document {external_document_number}."
+            )
+        return rows[0]
+
+    def get_posted_sales_invoice_lines(
+        self,
+        sales_invoice_id: str,
+        *,
+        company_id: str | None = None,
+        market: str | None = None,
+    ) -> list[dict[str, Any]]:
+        company = self._resolve_company_id(company_id=company_id, market=market)
+        if not company:
+            raise ValueError(
+                "A company ID is required. Set BC_COMPANY_ID, configure BC_MARKET_<CODE>_COMPANY_ID, "
+                "or pass company_id explicitly."
+            )
+        url = (
+            f"{self.settings.api_base_url}/companies({company})/"
+            f"salesInvoices({sales_invoice_id})/salesInvoiceLines"
+        )
+        return self._request("GET", url).get("value", [])
+
+    def get_sales_invoice_pdf_content(
+        self,
+        sales_invoice_id: str,
+        *,
+        company_id: str | None = None,
+        market: str | None = None,
+    ) -> bytes:
+        company = self._resolve_company_id(company_id=company_id, market=market)
+        if not company:
+            raise ValueError(
+                "A company ID is required. Set BC_COMPANY_ID, configure BC_MARKET_<CODE>_COMPANY_ID, "
+                "or pass company_id explicitly."
+            )
+
+        url = (
+            f"{self.settings.api_base_url}/companies({company})/"
+            f"salesInvoices({sales_invoice_id})/pdfDocument"
+        )
+        pdf_document = self._request("GET", url)
+        content_url = _pdf_document_content_url(pdf_document)
+        if not content_url:
+            raise ValueError(f"Business Central did not expose a PDF content link for invoice {sales_invoice_id}.")
+
+        return self._request_bytes("GET", content_url, headers={"Accept": "application/pdf"})
+
+    def get_customer_by_id(
+        self,
+        customer_id: str,
+        *,
+        company_id: str | None = None,
+        market: str | None = None,
+    ) -> dict[str, Any] | None:
+        try:
+            return self.get_entity(
+                "customers",
+                customer_id,
+                company_id=company_id,
+                market=market,
+            )
+        except requests.HTTPError as exc:
+            if exc.response is not None and exc.response.status_code == 404:
+                return None
+            raise
+
+    def get_customer_ledger_entries_by_document_no(
+        self,
+        document_no: str,
+        *,
+        company_id: str | None = None,
+        market: str | None = None,
+        top: int = 5,
+    ) -> list[dict[str, Any]]:
+        from urllib.parse import quote
+
+        company = self._resolve_company_id(company_id=company_id, market=market)
+        if not company:
+            raise ValueError(
+                "A company ID is required. Set BC_COMPANY_ID, configure BC_MARKET_<CODE>_COMPANY_ID, "
+                "or pass company_id explicitly."
+            )
+        company_metadata = self.get_company_metadata(company_id=company, market=market)
+        company_name = (company_metadata or {}).get("name")
+        if not company_name:
+            return []
+
+        escaped_company = "'" + company_name.replace("'", "''") + "'"
+        escaped_document_no = document_no.replace("'", "''")
+        url = (
+            f"https://api.businesscentral.dynamics.com/v2.0/{self.settings.environment}/"
+            f"ODataV4/Company({quote(escaped_company, safe='()')})/CustomerLedgerEntires"
+        )
+        return self._request(
+            "GET",
+            url,
+            params={
+                "$top": top,
+                "$filter": f"Document_No eq '{escaped_document_no}'",
+            },
+        ).get("value", [])
+
+    def get_gt_registered_invoice_by_number(
+        self,
+        invoice_number: str,
+        *,
+        company_id: str | None = None,
+        market: str | None = None,
+    ) -> dict[str, Any] | None:
+        from urllib.parse import quote
+
+        company = self._resolve_company_id(company_id=company_id, market=market)
+        if not company:
+            raise ValueError(
+                "A company ID is required. Set BC_COMPANY_ID, configure BC_MARKET_<CODE>_COMPANY_ID, "
+                "or pass company_id explicitly."
+            )
+        company_metadata = self.get_company_metadata(company_id=company, market=market)
+        company_name = (company_metadata or {}).get("name")
+        if not company_name:
+            return None
+
+        escaped_company = "'" + company_name.replace("'", "''") + "'"
+        escaped_invoice_number = invoice_number.replace("'", "''")
+        url = (
+            f"https://api.businesscentral.dynamics.com/v2.0/{self.settings.environment}/"
+            f"ODataV4/Company({quote(escaped_company, safe='()')})/GT_Facturasregistradas"
+        )
+        rows = self._request(
+            "GET",
+            url,
+            params={
+                "$top": 2,
+                "$filter": f"No eq '{escaped_invoice_number}'",
+            },
+        ).get("value", [])
+        if not rows:
+            return None
+        if len(rows) > 1:
+            raise ValueError(f"More than one GT registered invoice matched {invoice_number}.")
+        return rows[0]
+
+    def build_sales_invoice_url(
+        self,
+        *,
+        company_name: str,
+        invoice_number: str,
+    ) -> str:
+        from urllib.parse import quote
+
+        base = f"https://businesscentral.dynamics.com/{self.settings.tenant_id}/{quote(self.settings.environment, safe='')}/"
+        escaped_invoice_number = invoice_number.replace("'", "''")
+        filter_expr = f"'Sales Invoice Header'.'No.' IS '{escaped_invoice_number}'"
+        query = (
+            f"?company={quote(company_name, safe='')}"
+            f"&page=132"
+            f"&filter={quote(filter_expr, safe='')}"
+            f"&dc=0"
+        )
+        return base + query
 
     def patch_entity(
         self,
@@ -238,6 +479,110 @@ class BusinessCentralClient:
             market=market,
         )
 
+    def post_sales_invoice(
+        self,
+        sales_invoice_id: str,
+        *,
+        company_id: str | None = None,
+        market: str | None = None,
+    ) -> dict[str, Any]:
+        return self.post_to_company(
+            f"/companies({{company_id}})/salesInvoices({sales_invoice_id})/Microsoft.NAV.post",
+            {},
+            company_id=company_id,
+            market=market,
+        )
+
+    def get_posted_invoice_fel_description_by_number(
+        self,
+        invoice_number: str,
+        *,
+        company_id: str | None = None,
+        market: str | None = None,
+    ) -> dict[str, Any] | None:
+        escaped = invoice_number.replace("'", "''")
+        rows = self._get_posted_invoice_fel_descriptions(
+            filters=f"number eq '{escaped}'",
+            top=2,
+            company_id=company_id,
+            market=market,
+        )
+        if not rows:
+            return None
+        if len(rows) > 1:
+            raise ValueError(f"More than one posted invoice FEL row matched {invoice_number}.")
+        return rows[0]
+
+    def sync_posted_invoice_fel_line_descriptions(
+        self,
+        posted_invoice_fel_row_id: str,
+        *,
+        company_id: str | None = None,
+        market: str | None = None,
+    ) -> dict[str, Any]:
+        return self._post_posted_invoice_fel_action(
+            posted_invoice_fel_row_id,
+            "SyncFelLineDescriptions",
+            company_id=company_id,
+            market=market,
+        )
+
+    def stamp_posted_invoice_fel(
+        self,
+        posted_invoice_fel_row_id: str,
+        *,
+        company_id: str | None = None,
+        market: str | None = None,
+    ) -> dict[str, Any]:
+        return self._post_posted_invoice_fel_action(
+            posted_invoice_fel_row_id,
+            "StampFelInvoice",
+            company_id=company_id,
+            market=market,
+        )
+
+    def _get_posted_invoice_fel_descriptions(
+        self,
+        *,
+        filters: str,
+        top: int = 1,
+        company_id: str | None = None,
+        market: str | None = None,
+    ) -> list[dict[str, Any]]:
+        company = self._resolve_company_id(company_id=company_id, market=market)
+        if not company:
+            raise ValueError(
+                "A company ID is required. Set BC_COMPANY_ID, configure BC_MARKET_<CODE>_COMPANY_ID, "
+                "or pass company_id explicitly."
+            )
+        url = (
+            f"https://api.businesscentral.dynamics.com/v2.0/{self.settings.environment}"
+            f"/api/mtmlogix/invoiceSync/v1.0/companies({company})/postedInvoiceFelDescriptions"
+        )
+        return self._request(
+            "GET",
+            url,
+            params={"$top": top, "$filter": filters},
+        ).get("value", [])
+
+    def _post_posted_invoice_fel_action(
+        self,
+        posted_invoice_fel_row_id: str,
+        action_name: str,
+        *,
+        company_id: str | None = None,
+        market: str | None = None,
+    ) -> dict[str, Any]:
+        return self.post_to_company(
+            (
+                "/api/mtmlogix/invoiceSync/v1.0/companies({company_id})/"
+                f"postedInvoiceFelDescriptions({posted_invoice_fel_row_id})/Microsoft.NAV.{action_name}"
+            ),
+            {},
+            company_id=company_id,
+            market=market,
+        )
+
     def resolve_account_by_number(
         self,
         account_number: str,
@@ -258,6 +603,78 @@ class BusinessCentralClient:
         if not rows:
             return None
         return rows[0]
+
+    def resolve_item_by_number(
+        self,
+        item_number: str,
+        *,
+        market: str | None = None,
+    ) -> dict[str, Any] | None:
+        needle = (item_number or "").strip()
+        if not needle:
+            return None
+
+        escaped = needle.replace("'", "''")
+        rows = self.find_entities(
+            "items",
+            filters=f"number eq '{escaped}'",
+            top=1,
+            market=market,
+        )
+        if not rows:
+            return None
+        return rows[0]
+
+    def resolve_customer_by_name(
+        self,
+        customer_name: str,
+        *,
+        market: str | None = None,
+    ) -> dict[str, Any] | None:
+        needle = _normalize_match_text(customer_name)
+        if not needle:
+            return None
+        needle_name_keys = _customer_name_match_keys(customer_name)
+
+        rows = self.get_entities("customers", top=1000, market=market).get("value", [])
+        exact_matches = [
+            row
+            for row in rows
+            if needle in {_normalize_match_text(row.get("number") or "")}
+            or needle_name_keys
+            & (
+                _customer_name_match_keys(row.get("displayName") or "")
+                | _customer_name_match_keys(row.get("name") or "")
+            )
+        ]
+        if exact_matches:
+            return _single_customer_match(exact_matches, customer_name)
+
+        if len(needle) < 4:
+            return None
+
+        contained_matches = []
+        for row in rows:
+            name_candidates = (
+                _customer_name_match_keys(row.get("displayName") or "")
+                | _customer_name_match_keys(row.get("name") or "")
+            )
+            contact_candidates = (
+                _normalize_match_text(row.get("email") or ""),
+                _normalize_match_text(row.get("website") or ""),
+            )
+            if any(
+                candidate
+                and needle_key
+                and (needle_key in candidate or candidate in needle_key)
+                for candidate in name_candidates
+                for needle_key in needle_name_keys
+            ) or any(candidate and (needle in candidate or candidate in needle) for candidate in contact_candidates):
+                contained_matches.append(row)
+
+        if not contained_matches:
+            return None
+        return _single_customer_match(contained_matches, customer_name)
 
     def _expand_relative_path(self, path: str, company_id: str, **path_params: str) -> str:
         cleaned = path if path.startswith("/") else f"/{path}"
@@ -313,3 +730,75 @@ class BusinessCentralClient:
             return market_settings.company_id
 
         return self.settings.company_id
+
+
+def _normalize_match_text(value: str) -> str:
+    value = unicodedata.normalize("NFKD", value or "").encode("ascii", "ignore").decode("ascii")
+    value = value.lower()
+    value = re.sub(r"[^a-z0-9]+", " ", value)
+    return " ".join(value.split())
+
+
+def _pdf_document_content_url(pdf_document: dict[str, Any]) -> str:
+    for key in ("pdfDocumentContent@odata.mediaReadLink", "content@odata.mediaReadLink"):
+        value = pdf_document.get(key)
+        if value:
+            return str(value)
+
+    value = pdf_document.get("value")
+    if isinstance(value, list):
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            for key in ("pdfDocumentContent@odata.mediaReadLink", "content@odata.mediaReadLink"):
+                nested_value = item.get(key)
+                if nested_value:
+                    return str(nested_value)
+
+    return ""
+
+
+def _customer_name_match_keys(value: str) -> set[str]:
+    normalized = _normalize_match_text(value)
+    if not normalized:
+        return set()
+
+    keys = {normalized}
+    without_suffix = _strip_common_company_suffix(normalized)
+    if without_suffix:
+        keys.add(without_suffix)
+    return keys
+
+
+def _strip_common_company_suffix(value: str) -> str:
+    cleaned = value
+    suffixes = (
+        "sociedad anonima",
+        "s a",
+        "sa",
+    )
+    changed = True
+    while changed:
+        changed = False
+        for suffix in suffixes:
+            if cleaned == suffix:
+                return ""
+            if cleaned.endswith(f" {suffix}"):
+                cleaned = cleaned[: -len(suffix)].strip()
+                changed = True
+    return cleaned
+
+
+def _single_customer_match(rows: list[dict[str, Any]], customer_name: str) -> dict[str, Any]:
+    unique_by_id: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        key = str(row.get("id") or row.get("number") or row.get("displayName") or id(row))
+        unique_by_id[key] = row
+    unique_rows = list(unique_by_id.values())
+    if len(unique_rows) > 1:
+        names = ", ".join(
+            str(row.get("number") or row.get("displayName") or row.get("id") or "")
+            for row in unique_rows[:5]
+        )
+        raise ValueError(f"More than one Business Central customer matched {customer_name}: {names}")
+    return unique_rows[0]
