@@ -64,6 +64,11 @@ codeunit 71002 "MTM GT Posted Inv FEL Mgt"
     end;
 
     procedure CancelPostedInvoiceWithMotive(SalesInv: Record "Sales Invoice Header"; MotiveText: Text)
+    begin
+        CancelPostedInvoiceWithMotiveAndIssueDateTime(SalesInv, MotiveText, '');
+    end;
+
+    procedure CancelPostedInvoiceWithMotiveAndIssueDateTime(SalesInv: Record "Sales Invoice Header"; MotiveText: Text; IssueDateTimeText: Text)
     var
         FacturaGuata: Record "General Ledger Setup";
         Company: Record "Company Information";
@@ -87,6 +92,7 @@ codeunit 71002 "MTM GT Posted Inv FEL Mgt"
         FiscalInvoiceNumberPAC: Text;
         DateTimeStamped: Text;
         CancelDateTimeText: Text;
+        ResolvedIssueDateTimeText: Text;
     begin
         if MotiveText = '' then
             Error('Cancellation motive text is required.');
@@ -105,10 +111,14 @@ codeunit 71002 "MTM GT Posted Inv FEL Mgt"
             Error('Invoice %1 does not have Fiscal Invoice Number PAC.', SalesInv."No.");
 
         CancelDateTimeText := Format(Today(), 0, '<Year4>-<Month,2>-<Day,2>') + 'T' + Format(Time(), 0, '<Hours24,2><Filler Character,0>:<Minutes,2>:<Seconds,2>');
+        ResolvedIssueDateTimeText := IssueDateTimeText;
+        if ResolvedIssueDateTimeText = '' then
+            ResolvedIssueDateTimeText := ResolveCancellationIssueDateTime(DateTimeStamped, SalesInv."Posting Date");
+
         Body :=
             '<dte:GTAnulacionDocumento xmlns:ds="http://www.w3.org/2000/09/xmldsig#" xmlns:dte="http://www.sat.gob.gt/dte/fel/0.1.0" xmlns:n1="http://www.altova.com/samplexml/other-namespace" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" Version="0.1" xsi:schemaLocation="http://www.sat.gob.gt/dte/fel/0.1.0 C:\Users\User\Desktop\FEL\Esquemas\GT_AnulacionDocumento-0.1.0.xsd">' +
             '<dte:SAT><dte:AnulacionDTE ID="DatosCertificados">' +
-            '<dte:DatosGenerales FechaEmisionDocumentoAnular="' + EscapeXml(ResolveCancellationIssueDateTime(DateTimeStamped)) + '" FechaHoraAnulacion="' + EscapeXml(CancelDateTimeText) + '" ID="DatosAnulacion" IDReceptor="' + EscapeXml(Cliente."VAT Registration No.") + '" MotivoAnulacion="' + EscapeXml(MotiveText) + '" NITEmisor="' + EscapeXml(Company."VAT Registration No.") + '" NumeroDocumentoAAnular="' + EscapeXml(FiscalInvoiceNumberPAC) + '"></dte:DatosGenerales>' +
+            '<dte:DatosGenerales FechaEmisionDocumentoAnular="' + EscapeXml(ResolvedIssueDateTimeText) + '" FechaHoraAnulacion="' + EscapeXml(CancelDateTimeText) + '" ID="DatosAnulacion" IDReceptor="' + EscapeXml(Cliente."VAT Registration No.") + '" MotivoAnulacion="' + EscapeXml(MotiveText) + '" NITEmisor="' + EscapeXml(Company."VAT Registration No.") + '" NumeroDocumentoAAnular="' + EscapeXml(FiscalInvoiceNumberPAC) + '"></dte:DatosGenerales>' +
             '</dte:AnulacionDTE></dte:SAT></dte:GTAnulacionDocumento>';
 
         Content.WriteFrom(Body);
@@ -161,10 +171,14 @@ codeunit 71002 "MTM GT Posted Inv FEL Mgt"
         GranTotalT: Text;
         GranTotalIVAT: Text;
         ValidaFrase: Boolean;
+        CompanyPais: Text;
+        ClientePais: Text;
     begin
         SeparacionAddenda(SalesInv."No.", Letras, Numeros);
         Company.FindFirst();
         Cliente.Get(SalesInv."Sell-to Customer No.");
+        CompanyPais := ResolveFelCountryCode(Company.Pais, Company."Country/Region Code", 'company information');
+        ClientePais := ResolveFelCountryCode(Cliente.Pais, Cliente."Country/Region Code", StrSubstNo('customer %1', Cliente."No."));
 
         FechaText := Format(Today(), 0, '<Year4>-<Month,2>-<Day,2>');
         TiempoText := FechaText + 'T' + Format(Time(), 0, '<Hours24,2><Filler Character,0>:<Minutes,2>:<Seconds,2>');
@@ -206,10 +220,10 @@ codeunit 71002 "MTM GT Posted Inv FEL Mgt"
             '<dte:DatosEmision ID="DatosEmision">' +
             '<dte:DatosGenerales CodigoMoneda="' + EscapeXml(CurrencyCode) + '" FechaHoraEmision="' + EscapeXml(TiempoText) + '" Tipo="FACT"/>' +
             '<dte:Emisor AfiliacionIVA="GEN" CodigoEstablecimiento="1" NITEmisor="' + EscapeXml(Company."VAT Registration No.") + '" NombreComercial="' + EscapeXml(Company."Nombre comercial") + '" NombreEmisor="' + EscapeXml(Company.Name) + '">' +
-            '<dte:DireccionEmisor><dte:Direccion>' + EscapeXml(Company.Address) + '</dte:Direccion><dte:CodigoPostal>' + EscapeXml(Company."Post Code") + '</dte:CodigoPostal><dte:Municipio>' + EscapeXml(Company.City) + '</dte:Municipio><dte:Departamento>' + EscapeXml(Company.County) + '</dte:Departamento><dte:Pais>' + EscapeXml(Company.Pais) + '</dte:Pais></dte:DireccionEmisor>' +
+            '<dte:DireccionEmisor><dte:Direccion>' + EscapeXml(Company.Address) + '</dte:Direccion><dte:CodigoPostal>' + EscapeXml(Company."Post Code") + '</dte:CodigoPostal><dte:Municipio>' + EscapeXml(Company.City) + '</dte:Municipio><dte:Departamento>' + EscapeXml(Company.County) + '</dte:Departamento><dte:Pais>' + EscapeXml(CompanyPais) + '</dte:Pais></dte:DireccionEmisor>' +
             '</dte:Emisor>' +
             '<dte:Receptor CorreoReceptor="' + EscapeXml(Cliente."E-Mail") + '" IDReceptor="' + EscapeXml(Cliente."VAT Registration No.") + '" NombreReceptor="' + EscapeXml(Cliente.Name) + '" ' + TipoEspecial + '>' +
-            '<dte:DireccionReceptor><dte:Direccion>' + EscapeXml(Cliente.Address) + '</dte:Direccion><dte:CodigoPostal>' + EscapeXml(Cliente."Post Code") + '</dte:CodigoPostal><dte:Municipio>' + EscapeXml(Cliente.City) + '</dte:Municipio><dte:Departamento>' + EscapeXml(Cliente.County) + '</dte:Departamento><dte:Pais>' + EscapeXml(Cliente.Pais) + '</dte:Pais></dte:DireccionReceptor>' +
+            '<dte:DireccionReceptor><dte:Direccion>' + EscapeXml(Cliente.Address) + '</dte:Direccion><dte:CodigoPostal>' + EscapeXml(Cliente."Post Code") + '</dte:CodigoPostal><dte:Municipio>' + EscapeXml(Cliente.City) + '</dte:Municipio><dte:Departamento>' + EscapeXml(Cliente.County) + '</dte:Departamento><dte:Pais>' + EscapeXml(ClientePais) + '</dte:Pais></dte:DireccionReceptor>' +
             '</dte:Receptor>' +
             '<dte:Frases><dte:Frase CodigoEscenario="1" TipoFrase="1"/>' + Subfrase + '</dte:Frases><dte:Items>';
 
@@ -225,75 +239,31 @@ codeunit 71002 "MTM GT Posted Inv FEL Mgt"
         exit(Body + SubBody + Otros);
     end;
 
-    local procedure ResolveCancellationIssueDateTime(DateTimeStamped: Text): Text
+    local procedure ResolveFelCountryCode(FelCountryCode: Text; CountryRegionCode: Code[10]; SourceDescription: Text): Text
     var
-        IssueDate: Date;
-        Year: Integer;
-        Month: Integer;
-        Day: Integer;
-        Hour: Integer;
-        Minute: Integer;
-        Second: Integer;
-        OffsetHour: Integer;
-        OffsetMinute: Integer;
-        MinuteOfDay: Integer;
-        OffsetMinutes: Integer;
-        OffsetSign: Text[1];
+        ResolvedCountryCode: Text;
     begin
-        if StrLen(DateTimeStamped) < 25 then
+        ResolvedCountryCode := DelChr(FelCountryCode, '=', ' ');
+        if ResolvedCountryCode = '' then
+            ResolvedCountryCode := DelChr(CountryRegionCode, '=', ' ');
+
+        ResolvedCountryCode := UpperCase(ResolvedCountryCode);
+        if ResolvedCountryCode = '' then
+            Error('FEL country code is required for %1.', SourceDescription);
+
+        exit(ResolvedCountryCode);
+    end;
+
+    local procedure ResolveCancellationIssueDateTime(DateTimeStamped: Text; InvoiceIssueDate: Date): Text
+    begin
+        if StrLen(DateTimeStamped) < 19 then
             exit(DateTimeStamped);
         if CopyStr(DateTimeStamped, 11, 1) <> 'T' then
             exit(DateTimeStamped);
+        if InvoiceIssueDate <> 0D then
+            exit(Format(InvoiceIssueDate, 0, '<Year4>-<Month,2>-<Day,2>') + CopyStr(DateTimeStamped, 11, 9));
 
-        OffsetSign := CopyStr(DateTimeStamped, 20, 1);
-        if not (OffsetSign in ['+', '-']) then
-            exit(DateTimeStamped);
-
-        if not Evaluate(Year, CopyStr(DateTimeStamped, 1, 4)) then
-            exit(DateTimeStamped);
-        if not Evaluate(Month, CopyStr(DateTimeStamped, 6, 2)) then
-            exit(DateTimeStamped);
-        if not Evaluate(Day, CopyStr(DateTimeStamped, 9, 2)) then
-            exit(DateTimeStamped);
-        if not Evaluate(Hour, CopyStr(DateTimeStamped, 12, 2)) then
-            exit(DateTimeStamped);
-        if not Evaluate(Minute, CopyStr(DateTimeStamped, 15, 2)) then
-            exit(DateTimeStamped);
-        if not Evaluate(Second, CopyStr(DateTimeStamped, 18, 2)) then
-            exit(DateTimeStamped);
-        if not Evaluate(OffsetHour, CopyStr(DateTimeStamped, 21, 2)) then
-            exit(DateTimeStamped);
-        if not Evaluate(OffsetMinute, CopyStr(DateTimeStamped, 24, 2)) then
-            exit(DateTimeStamped);
-
-        IssueDate := DMY2Date(Day, Month, Year);
-        MinuteOfDay := (Hour * 60) + Minute;
-        OffsetMinutes := (OffsetHour * 60) + OffsetMinute;
-        if OffsetSign = '-' then
-            MinuteOfDay += OffsetMinutes
-        else
-            MinuteOfDay -= OffsetMinutes;
-
-        while MinuteOfDay >= 1440 do begin
-            IssueDate := CalcDate('<+1D>', IssueDate);
-            MinuteOfDay -= 1440;
-        end;
-        while MinuteOfDay < 0 do begin
-            IssueDate := CalcDate('<-1D>', IssueDate);
-            MinuteOfDay += 1440;
-        end;
-
-        exit(
-            Format(IssueDate, 0, '<Year4>-<Month,2>-<Day,2>') + 'T' +
-            Pad2(MinuteOfDay div 60) + ':' + Pad2(MinuteOfDay mod 60) + ':' + Pad2(Second)
-        );
-    end;
-
-    local procedure Pad2(Value: Integer): Text
-    begin
-        if Value < 10 then
-            exit('0' + Format(Value));
-        exit(Format(Value));
+        exit(CopyStr(DateTimeStamped, 1, 19));
     end;
 
     local procedure BuildFacturaGTLineXml(SalesInv: Record "Sales Invoice Header"; var GranTotal: Decimal; var GranTotalIVA: Decimal; var GranTotalT: Text; var GranTotalIVAT: Text; var LastImpuestosinfoSAT: Record "VAT Product Posting Group"): Text

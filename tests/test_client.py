@@ -1,4 +1,9 @@
-from business_central_client.client import BusinessCentralClient
+import json
+
+import pytest
+import requests
+
+from business_central_client.client import BusinessCentralClient, _raise_for_status_with_detail
 from business_central_client.config import MarketSettings, Settings
 
 
@@ -63,6 +68,28 @@ def test_resolve_market_company_id() -> None:
     assert client._resolve_company_id(company_id=None, market="GT") == "gt-company-id"
     assert client._resolve_company_id(company_id=None, market="MX") == "mx-company-id"
     assert client._resolve_company_id(company_id="override-id", market="GT") == "override-id"
+
+
+def test_raise_for_status_includes_business_central_error_message() -> None:
+    response = requests.Response()
+    response.status_code = 400
+    response.url = "https://api.businesscentral.dynamics.com/v2.0/Production/api/v2.0/companies(x)/salesInvoices"
+    response._content = json.dumps(
+        {
+            "error": {
+                "code": "Application_FieldValidationException",
+                "message": "Gen. Bus. Posting Group must have a value in Customer: No.=C00107.",
+            }
+        }
+    ).encode("utf-8")
+
+    with pytest.raises(requests.HTTPError) as exc_info:
+        _raise_for_status_with_detail(response)
+
+    message = str(exc_info.value)
+    assert "400 Client Error" in message
+    assert "Business Central detail" in message
+    assert "Gen. Bus. Posting Group must have a value" in message
 
 
 def test_resolve_customer_by_name_accepts_unique_contained_match() -> None:

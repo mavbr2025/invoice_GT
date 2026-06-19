@@ -97,7 +97,7 @@ codeunit 71001 "MTM Customer Invoicing Mgt"
         if not TryGetFieldRef(RecordRef, FieldNo, FieldRef) then
             exit(false);
 
-        if Format(FieldRef.Value) <> '' then
+        if DelChr(Format(FieldRef.Value), '=', ' ') <> '' then
             exit(false);
 
         FieldRef.Value := Value;

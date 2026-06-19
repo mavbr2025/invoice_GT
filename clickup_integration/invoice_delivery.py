@@ -379,6 +379,20 @@ def _set_invoice_status(
         if option_id is None:
             raise ValueError(f"Could not resolve ClickUp invoice status option: {target_status}")
         return clickup.set_task_custom_field_value(clickup_summary["task_id"], field["id"], option_id)
+
+    for field_id in settings.invoice_status_field_ids:
+        field = _find_custom_field_by_id(custom_fields, field_id=field_id)
+        if not field:
+            continue
+        option_id = _dropdown_option_id(field, target_status)
+        if option_id is None:
+            raise ValueError(f"Could not resolve ClickUp invoice status option: {target_status}")
+        return clickup.set_task_custom_field_value(
+            clickup_summary["task_id"],
+            field.get("id") or field_id,
+            option_id,
+        )
+
     raise ValueError("Could not find the ClickUp invoice status field to mark the task as Facturada.")
 
 
@@ -391,4 +405,4 @@ def _dropdown_option_id(field: dict[str, Any], option_name: str) -> str | int | 
 
 
 def _normalize_status(value: str | None) -> str:
-    return " ".join((value or "").strip().lower().replace("-", " ").split())
+    return "".join(char for char in (value or "").strip().lower() if char.isalnum())

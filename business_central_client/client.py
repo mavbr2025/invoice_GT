@@ -10,6 +10,34 @@ from business_central_client.auth import TokenProvider
 from business_central_client.config import Settings
 
 
+def _business_central_error_detail(response: requests.Response) -> str:
+    try:
+        payload = response.json()
+    except ValueError:
+        detail = response.text
+    else:
+        error = payload.get("error") if isinstance(payload, dict) else None
+        if isinstance(error, dict):
+            detail = str(error.get("message") or error.get("code") or "")
+        else:
+            detail = response.text
+
+    return detail.strip()[:2000]
+
+
+def _raise_for_status_with_detail(response: requests.Response) -> None:
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        detail = _business_central_error_detail(response)
+        if detail:
+            raise requests.HTTPError(
+                f"{exc}. Business Central detail: {detail}",
+                response=response,
+            ) from exc
+        raise
+
+
 class BusinessCentralClient:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -46,7 +74,7 @@ class BusinessCentralClient:
             json=json,
             timeout=self.settings.timeout_seconds,
         )
-        response.raise_for_status()
+        _raise_for_status_with_detail(response)
         if not response.content:
             return {}
         return response.json()
@@ -69,7 +97,7 @@ class BusinessCentralClient:
             params=params,
             timeout=self.settings.timeout_seconds,
         )
-        response.raise_for_status()
+        _raise_for_status_with_detail(response)
         return response.content
 
     def get_environments(self) -> dict[str, Any]:
@@ -259,6 +287,54 @@ class BusinessCentralClient:
             if exc.response is not None and exc.response.status_code == 404:
                 return None
             raise
+
+    def get_customer_invoicing_by_number(
+        self,
+        customer_number: str,
+        *,
+        company_id: str | None = None,
+        market: str | None = None,
+    ) -> dict[str, Any] | None:
+        needle = (customer_number or "").strip()
+        if not needle:
+            return None
+
+        escaped = needle.replace("'", "''")
+        rows = self._get_customer_invoicing_rows(
+            filters=f"number eq '{escaped}'",
+            top=2,
+            company_id=company_id,
+            market=market,
+        )
+        if not rows:
+            return None
+        if len(rows) > 1:
+            raise ValueError(f"More than one customer invoicing row matched {customer_number}.")
+        return rows[0]
+
+    def get_customer_invoicing_by_id(
+        self,
+        customer_id: str,
+        *,
+        company_id: str | None = None,
+        market: str | None = None,
+    ) -> dict[str, Any] | None:
+        needle = (customer_id or "").strip()
+        if not needle:
+            return None
+
+        escaped = needle.replace("'", "''")
+        rows = self._get_customer_invoicing_rows(
+            filters=f"id eq {escaped}",
+            top=2,
+            company_id=company_id,
+            market=market,
+        )
+        if not rows:
+            return None
+        if len(rows) > 1:
+            raise ValueError(f"More than one customer invoicing row matched customer id {customer_id}.")
+        return rows[0]
 
     def get_customer_ledger_entries_by_document_no(
         self,
@@ -541,6 +617,56 @@ class BusinessCentralClient:
             market=market,
         )
 
+    def set_mx_substitution_relation(
+        self,
+        posted_invoice_fel_row_id: str,
+        old_invoice_number: str,
+        *,
+        company_id: str | None = None,
+        market: str | None = None,
+    ) -> dict[str, Any]:
+        return self._post_posted_invoice_fel_action(
+            posted_invoice_fel_row_id,
+            "SetMxSubstitutionRelation",
+            body={"oldInvoiceNumber": old_invoice_number},
+            company_id=company_id,
+            market=market,
+        )
+
+    def stamp_mx_invoice(
+        self,
+        posted_invoice_fel_row_id: str,
+        *,
+        company_id: str | None = None,
+        market: str | None = None,
+    ) -> dict[str, Any]:
+        return self._post_posted_invoice_fel_action(
+            posted_invoice_fel_row_id,
+            "StampMxInvoice",
+            company_id=company_id,
+            market=market,
+        )
+
+    def cancel_mx_invoice_with_substitution(
+        self,
+        posted_invoice_fel_row_id: str,
+        substitution_invoice_number: str,
+        *,
+        cancellation_reason_id: str = "01",
+        company_id: str | None = None,
+        market: str | None = None,
+    ) -> dict[str, Any]:
+        return self._post_posted_invoice_fel_action(
+            posted_invoice_fel_row_id,
+            "CancelMxInvoiceWithSubstitution",
+            body={
+                "substitutionInvoiceNumber": substitution_invoice_number,
+                "cancellationReasonId": cancellation_reason_id,
+            },
+            company_id=company_id,
+            market=market,
+        )
+
     def _get_posted_invoice_fel_descriptions(
         self,
         *,
@@ -565,11 +691,36 @@ class BusinessCentralClient:
             params={"$top": top, "$filter": filters},
         ).get("value", [])
 
+    def _get_customer_invoicing_rows(
+        self,
+        *,
+        filters: str,
+        top: int = 1,
+        company_id: str | None = None,
+        market: str | None = None,
+    ) -> list[dict[str, Any]]:
+        company = self._resolve_company_id(company_id=company_id, market=market)
+        if not company:
+            raise ValueError(
+                "A company ID is required. Set BC_COMPANY_ID, configure BC_MARKET_<CODE>_COMPANY_ID, "
+                "or pass company_id explicitly."
+            )
+        url = (
+            f"https://api.businesscentral.dynamics.com/v2.0/{self.settings.environment}"
+            f"/api/mtmlogix/customerSync/v1.0/companies({company})/customerInvoicing"
+        )
+        return self._request(
+            "GET",
+            url,
+            params={"$top": top, "$filter": filters},
+        ).get("value", [])
+
     def _post_posted_invoice_fel_action(
         self,
         posted_invoice_fel_row_id: str,
         action_name: str,
         *,
+        body: dict[str, Any] | None = None,
         company_id: str | None = None,
         market: str | None = None,
     ) -> dict[str, Any]:
@@ -578,7 +729,7 @@ class BusinessCentralClient:
                 "/api/mtmlogix/invoiceSync/v1.0/companies({company_id})/"
                 f"postedInvoiceFelDescriptions({posted_invoice_fel_row_id})/Microsoft.NAV.{action_name}"
             ),
-            {},
+            body or {},
             company_id=company_id,
             market=market,
         )

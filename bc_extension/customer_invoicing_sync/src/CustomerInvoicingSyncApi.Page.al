@@ -54,6 +54,24 @@ page 71000 "MTM Customer Invoicing API"
                 {
                     Caption = 'Correo Factura';
                 }
+                field(countryRegionCode; Rec."Country/Region Code")
+                {
+                    Caption = 'Country/Region Code';
+                }
+                field(felPais; Rec.Pais)
+                {
+                    Caption = 'FEL Pais';
+                }
+                field(resolvedFelCountryCode; ResolvedFelCountryCodeTxt)
+                {
+                    Caption = 'Resolved FEL Country Code';
+                    Editable = false;
+                }
+                field(felCountryReady; FelCountryReady)
+                {
+                    Caption = 'FEL Country Ready';
+                    Editable = false;
+                }
                 field(phoneNumber; Rec."Phone No.")
                 {
                     Caption = 'Phone Number';
@@ -118,6 +136,7 @@ page 71000 "MTM Customer Invoicing API"
     begin
         LoadCustomFields();
         InvoiceEmailTxt := CorreoFacturaTxt;
+        ResolveFelCountryReadiness();
     end;
 
     trigger OnModifyRecord(): Boolean
@@ -147,11 +166,22 @@ page 71000 "MTM Customer Invoicing API"
             CashFlowPaymentTermsCodeTxt);
     end;
 
+    local procedure ResolveFelCountryReadiness()
+    begin
+        ResolvedFelCountryCodeTxt := UpperCase(DelChr(Format(Rec.Pais), '=', ' '));
+        if ResolvedFelCountryCodeTxt = '' then
+            ResolvedFelCountryCodeTxt := UpperCase(DelChr(Format(Rec."Country/Region Code"), '=', ' '));
+
+        FelCountryReady := ResolvedFelCountryCodeTxt <> '';
+    end;
+
     var
         CustomerInvoicingMgt: Codeunit "MTM Customer Invoicing Mgt";
         CfdiCustomerNameTxt: Text[250];
         CorreoFacturaTxt: Text[250];
         InvoiceEmailTxt: Text[250];
+        ResolvedFelCountryCodeTxt: Text[10];
+        FelCountryReady: Boolean;
         CopySellToAddressToTxt: Text[50];
         TaxIdentificationTypeTxt: Text[50];
         CashFlowPaymentTermsCodeTxt: Code[20];

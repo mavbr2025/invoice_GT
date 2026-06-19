@@ -1,3 +1,4 @@
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -177,6 +178,34 @@ def test_finalize_clickup_issued_invoices_accepts_finalized_stamped_invoice_resu
     assert "GTFVR0003923" in result["comment_text"]
     assert "GTFVR0003924" in result["comment_text"]
     assert "GTFV00000059" not in result["comment_text"]
+    assert result["final_status_update"] == {
+        "task_id": "task-1",
+        "field_id": "invoice-status",
+        "value": "invoiced",
+    }
+
+
+def test_finalize_clickup_issued_invoices_marks_status_by_field_id_when_name_differs() -> None:
+    clickup = FakeClickUp()
+    summary = clickup_summary()
+    status_field = summary["custom_fields"].pop("Estatus de facturación (USD)/")
+    summary["custom_fields"]["Shared invoice status"] = status_field
+    settings = replace(
+        make_settings(),
+        invoice_status_field_names=("Wrong field name",),
+        invoice_status_field_ids=("invoice-status",),
+    )
+
+    result = finalize_clickup_issued_invoices(
+        clickup=clickup,
+        bc_client=FakeBC(),
+        clickup_summary=summary,
+        invoice_result=finalized_invoice_result(),
+        settings=settings,
+        workspace_id="8451352",
+        mark_status=True,
+    )
+
     assert result["final_status_update"] == {
         "task_id": "task-1",
         "field_id": "invoice-status",

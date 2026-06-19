@@ -65,6 +65,8 @@ def test_invoice_readiness_reports_mapping_count(monkeypatch) -> None:
     from fastapi.testclient import TestClient
 
     monkeypatch.setenv("CLICKUP_INVOICE_WEBHOOK_APPLY", "false")
+    monkeypatch.setenv("CLICKUP_WEBHOOK_TOKEN", "expected-token")
+    monkeypatch.setenv("CLICKUP_ACCESS_TOKEN", "pk_test")
     monkeypatch.setattr("webhook_bridge.main.InvoiceAutomationSettings.from_env", _invoice_settings)
 
     response = TestClient(app).get("/clickup/webhooks/invoice-sync/readiness")
@@ -72,6 +74,7 @@ def test_invoice_readiness_reports_mapping_count(monkeypatch) -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["status"] == "ready"
+    assert payload["missing_runtime_config"] == []
     assert payload["apply_mode"] is False
     assert payload["charge_mapping_count"] == 2
     assert payload["line_type"] == "Item"
@@ -154,6 +157,21 @@ class _FakeClickUpClient:
         raise RuntimeError("lookup failed")
 
 
+class _FakeClickUpClientInternalIdFallback(_FakeClickUpClient):
+    def get_task(
+        self,
+        task_id: str,
+        *,
+        custom_task_ids: bool = False,
+        team_id: str | None = None,
+        include_subtasks: bool = False,
+    ) -> dict[str, object]:
+        self.calls.append((task_id, custom_task_ids, team_id))
+        if not custom_task_ids and team_id is None:
+            return {"id": task_id, "name": "internal id ok"}
+        raise RuntimeError("lookup failed")
+
+
 def test_infer_clickup_team_id_uses_single_authorized_workspace() -> None:
     client = _FakeClickUpClient()
     assert _infer_clickup_team_id(client) == "8451352"
@@ -171,6 +189,21 @@ def test_fetch_clickup_task_for_webhook_retries_with_inferred_team_id() -> None:
     assert client.calls == [
         ("MTM-1", True, None),
         ("MTM-1", True, "8451352"),
+    ]
+
+
+def test_fetch_clickup_task_for_webhook_retries_internal_id_after_custom_lookup() -> None:
+    client = _FakeClickUpClientInternalIdFallback(default_workspace_id="8451352")
+    task = _fetch_clickup_task_for_webhook(
+        clickup=client,
+        task_id="86e0nwb2p",
+        custom_task_ids=True,
+        team_id="8451352",
+    )
+    assert task == {"id": "86e0nwb2p", "name": "internal id ok"}
+    assert client.calls == [
+        ("86e0nwb2p", True, "8451352"),
+        ("86e0nwb2p", False, None),
     ]
 
 
@@ -263,8 +296,39 @@ class _FakeInvoiceBCClient:
         self.stamp_status = "Stamp Received"
 
     def find_entities(self, entity_name: str, *, filters: str, top: int = 1, company_id=None, market=None):
+        if entity_name == "customers":
+            return [
+                {
+                    "id": "customer-id",
+                    "number": "C00067",
+                    "displayName": "Customer",
+                    "currencyCode": "USD",
+                    "country": "GT",
+                    "countryCode": None,
+                }
+            ]
         assert entity_name == "salesInvoices"
         return []
+
+    def get_customer_by_id(self, customer_id: str, *, company_id=None, market=None):
+        return {
+            "id": customer_id,
+            "number": "C00067",
+            "displayName": "Customer",
+            "currencyCode": "USD",
+            "country": "GT",
+            "countryCode": None,
+        }
+
+    def get_customer_invoicing_by_number(self, customer_number: str, *, company_id=None, market=None):
+        return {
+            "id": "customer-id",
+            "number": customer_number,
+            "felPais": "",
+            "countryRegionCode": "GT",
+            "resolvedFelCountryCode": "GT",
+            "felCountryReady": True,
+        }
 
     def resolve_item_by_number(self, item_number: str, *, market: str | None = None):
         assert market == "GT"
@@ -371,7 +435,7 @@ def _invoice_settings() -> InvoiceAutomationSettings:
                 clickup_field_name="Freight (Ocean/Truck/Air)",
                 clickup_field_id="field-freight",
                 bc_item_number="INT000000026",
-                bc_description="TRANSPORTE MARITIMO",
+                bc_description="COORDINACION VIRTUAL DE TRANSPORTE MARITIMO",
                 tax_group="NO IVA",
             ),
             InvoiceChargeMapping(
@@ -467,6 +531,11 @@ def test_invoice_webhook_dry_run_previews_bridge_without_mutation(monkeypatch) -
     assert payload["result"]["status"] == "dry_run_ready"
     assert payload["result"]["invoice_count"] == 2
     assert payload["result"]["invoice_groups"] == ["INT", "NAT"]
+    assert payload["result"]["invoice_validation"]["status"] == "passed"
+    assert payload["result"]["invoice_validation"]["expected_totals_by_group"] == {
+        "INT": 125.5,
+        "NAT": 45.0,
+    }
     assert payload["result"]["proposed_bc_line_payloads"][0]["lineType"] == "Item"
     assert payload["result"]["proposed_bc_line_payloads"][0]["lineObjectNumber"] == "INT000000026"
     assert payload["result"]["proposed_bc_invoices"][0]["proposed_bc_payload"]["externalDocumentNumber"] == "PO-1-INT"

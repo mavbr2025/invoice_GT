@@ -11,7 +11,7 @@
       "clickup_field_id": "c8935d06-7f43-46c5-a1ef-444314dca0e9",
       "clickup_field_name": "Freight (Ocean/Truck/Air)",
       "bc_item_number": "INT000000026",
-      "bc_description": "TRANSPORTE MARITIMO",
+      "bc_description": "COORDINACION VIRTUAL DE TRANSPORTE MARITIMO",
       "tax_group": "NO IVA"
     },
     {
@@ -44,6 +44,22 @@
       "clickup_field_name": "Emergency Surcharge",
       "bc_item_number": "INT000000032",
       "bc_description": "EMERGENCY SURCHARGE",
+      "tax_group": "NO IVA"
+    },
+    {
+      "charge_name": "Food Grade Container",
+      "clickup_field_id": "47789ded-d701-41d0-9141-a9153a6080b0",
+      "clickup_field_name": "Food Grade Container",
+      "bc_item_number": "INT000000026",
+      "bc_description": "FOOD GRADE CONTAINER",
+      "tax_group": "NO IVA"
+    },
+    {
+      "charge_name": "Overweight",
+      "clickup_field_id": "5fec0ba3-5ec6-4549-89ba-3dd1bb45ae2e",
+      "clickup_field_name": "Overweight",
+      "bc_item_number": "INT000000026",
+      "bc_description": "OVERWEIGHT",
       "tax_group": "NO IVA"
     },
     {

@@ -11,16 +11,35 @@ from clickup_integration.invoice_sync import (
 
 
 class FakeBCInvoiceClient:
-    def __init__(self, *, existing_invoices: list[dict] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        existing_invoices: list[dict] | None = None,
+        customer_currency_code: str = "USD",
+        customer_fel_country_code: str | None = "GT",
+    ) -> None:
         self.settings = SimpleNamespace()
         self.existing_invoices = existing_invoices or []
+        self.customer_currency_code = customer_currency_code
+        self.customer_fel_country_code = customer_fel_country_code
         self.created_headers: list[dict] = []
         self.created_lines: list[dict] = []
         self.customer_name_lookups: list[str] = []
 
     def find_entities(self, entity_name: str, *, filters: str, top: int = 1, company_id=None, market=None):
-        assert entity_name == "salesInvoices"
         assert market == "GT"
+        if entity_name == "customers":
+            return [
+                {
+                    "id": "customer-id-1",
+                    "number": "C00067",
+                    "displayName": "Customer",
+                    "currencyCode": self.customer_currency_code,
+                    "country": "GT",
+                    "countryCode": None,
+                }
+            ]
+        assert entity_name == "salesInvoices"
         assert "externalDocumentNumber eq 'PO-7788" in filters
         return list(self.existing_invoices)
 
@@ -38,6 +57,29 @@ class FakeBCInvoiceClient:
         if customer_name == "MASESA":
             return {"id": "customer-masesa-id", "number": "C-MASESA", "displayName": "MASESA"}
         return None
+
+    def get_customer_by_id(self, customer_id: str, *, market: str | None = None):
+        assert market == "GT"
+        return {
+            "id": customer_id,
+            "number": "C00067",
+            "displayName": "Customer",
+            "currencyCode": self.customer_currency_code,
+            "country": "GT",
+            "countryCode": None,
+        }
+
+    def get_customer_invoicing_by_number(self, customer_number: str, *, company_id=None, market=None):
+        assert market == "GT"
+        assert customer_number == "C00067"
+        return {
+            "id": "customer-id-1",
+            "number": "C00067",
+            "felPais": "",
+            "countryRegionCode": self.customer_fel_country_code or "",
+            "resolvedFelCountryCode": self.customer_fel_country_code or "",
+            "felCountryReady": bool(self.customer_fel_country_code),
+        }
 
     def create_sales_invoice(self, payload: dict, *, company_id=None, market=None):
         assert market == "GT"
@@ -110,6 +152,50 @@ def test_prepare_clickup_invoice_status_transition_ready() -> None:
     assert result["status"] == "ready_to_update"
     assert result["target_status"] == "Listo para facturar"
     assert result["eta_date"] == "2026-04-15"
+
+
+def test_prepare_clickup_invoice_status_transition_accepts_hyphenated_ok_finops() -> None:
+    result = prepare_clickup_invoice_status_transition(
+        clickup_summary=make_clickup_summary(status="OK Fin-Ops"),
+        settings=make_settings(),
+        today=date(2026, 4, 8),
+    )
+
+    assert result["status"] == "ready_to_update"
+    assert result["target_status"] == "Listo para facturar"
+
+
+def test_prepare_clickup_invoice_status_transition_resolves_status_by_field_id() -> None:
+    settings = InvoiceAutomationSettings(
+        **{
+            **make_settings().__dict__,
+            "invoice_status_field_names": ("Wrong field name",),
+            "invoice_status_field_ids": ("field-invoice-status",),
+        }
+    )
+    summary = make_clickup_summary(status="por arribar")
+    summary["custom_fields"]["Renamed invoice status"] = {
+        "id": "field-invoice-status",
+        "type": "drop_down",
+        "value": 6,
+        "type_config": {
+            "options": [
+                {"id": "ok-finops", "name": "OK Fin-Ops", "orderindex": 6},
+                {"id": "ready", "name": "Listo para facturar", "orderindex": 7},
+            ]
+        },
+    }
+
+    result = prepare_clickup_invoice_status_transition(
+        clickup_summary=summary,
+        settings=settings,
+        today=date(2026, 4, 8),
+    )
+
+    assert result["status"] == "ready_to_update"
+    assert result["task_status"] == "OK Fin-Ops"
+    assert result["status_source"] == "custom_field_id"
+    assert result["target_status_option_id"] == "ready"
 
 
 def test_prepare_clickup_invoice_status_transition_uses_eta_field_id() -> None:
@@ -191,6 +277,32 @@ def test_prepare_clickup_bc_sales_invoice_preview_resolves_customer_from_clickup
     assert bc_client.customer_name_lookups == ["MASESA"]
 
 
+def test_prepare_clickup_bc_sales_invoice_preview_blocks_customer_currency_mismatch() -> None:
+    result = prepare_clickup_bc_sales_invoice_preview(
+        clickup_summary=make_clickup_summary(status="Listo para facturar"),
+        bc_client=FakeBCInvoiceClient(customer_currency_code="GTQ"),
+        settings=make_settings(),
+        today=date(2026, 4, 8),
+    )
+
+    assert result["status"] == "customer_currency_mismatch"
+    assert result["currency"] == "USD"
+    assert result["customer_resolution"]["bc_customer_currency"] == "GTQ"
+
+
+def test_prepare_clickup_bc_sales_invoice_preview_blocks_missing_gt_customer_fel_country_source() -> None:
+    result = prepare_clickup_bc_sales_invoice_preview(
+        clickup_summary=make_clickup_summary(status="Listo para facturar"),
+        bc_client=FakeBCInvoiceClient(customer_fel_country_code=None),
+        settings=make_settings(),
+        today=date(2026, 4, 8),
+    )
+
+    assert result["status"] == "customer_fel_readiness_failed"
+    assert result["customer_fel_readiness"]["status"] == "missing_fel_country_source"
+    assert "Pais" in result["message"]
+
+
 def test_prepare_clickup_bc_sales_invoice_preview_blocks_duplicates() -> None:
     result = prepare_clickup_bc_sales_invoice_preview(
         clickup_summary=make_clickup_summary(status="Listo para facturar"),
@@ -203,6 +315,26 @@ def test_prepare_clickup_bc_sales_invoice_preview_blocks_duplicates() -> None:
 
     assert result["status"] == "duplicate_invoice"
     assert result["existing_invoice"]["number"] == "SI-0009"
+
+
+def test_prepare_clickup_bc_sales_invoice_preview_ignores_canceled_duplicates() -> None:
+    result = prepare_clickup_bc_sales_invoice_preview(
+        clickup_summary=make_clickup_summary(status="Listo para facturar"),
+        bc_client=FakeBCInvoiceClient(
+            existing_invoices=[
+                {
+                    "id": "existing-id",
+                    "number": "SI-0009",
+                    "externalDocumentNumber": "PO-7788",
+                    "status": "Canceled",
+                }
+            ]
+        ),
+        settings=make_settings(),
+        today=date(2026, 4, 8),
+    )
+
+    assert result["status"] == "dry_run_ready"
 
 
 def test_apply_clickup_bc_sales_invoice_creates_header_and_lines() -> None:
@@ -241,7 +373,7 @@ def test_prepare_clickup_bc_sales_invoice_preview_uses_charge_mapping_items() ->
                     clickup_field_name="Freight (Ocean/Truck/Air)",
                     clickup_field_id="field-freight",
                     bc_item_number="INT000000026",
-                    bc_description="TRANSPORTE MARITIMO",
+                    bc_description="COORDINACION VIRTUAL DE TRANSPORTE MARITIMO",
                     tax_group="NO IVA",
                 ),
                 InvoiceChargeMapping(
@@ -276,12 +408,81 @@ def test_prepare_clickup_bc_sales_invoice_preview_uses_charge_mapping_items() ->
     assert result["proposed_bc_invoices"][1]["proposed_bc_payload"]["externalDocumentNumber"] == "PO-7788-NAT"
     assert result["proposed_bc_invoices"][0]["total"] == 100.5
     assert result["proposed_bc_invoices"][1]["total"] == 45.0
+    assert result["invoice_validation"]["status"] == "passed"
+    assert result["invoice_validation"]["expected_total"] == 145.5
+    assert result["invoice_validation"]["expected_totals_by_group"] == {"INT": 100.5, "NAT": 45.0}
+    assert result["invoice_validation"]["proposed_totals_by_group"] == {"INT": 100.5, "NAT": 45.0}
+    assert [field["charge_name"] for field in result["invoice_validation"]["billable_fields"]] == [
+        "Freight (Ocean/Truck/Air)",
+        "Destination Charges",
+    ]
     assert len(result["proposed_bc_line_payloads"]) == 2
     assert result["proposed_bc_line_payloads"][0]["lineType"] == "Item"
     assert result["proposed_bc_line_payloads"][0]["lineObjectNumber"] == "INT000000026"
     assert result["proposed_bc_line_payloads"][0]["itemId"] == "item-INT000000026"
     assert result["proposed_bc_line_payloads"][1]["lineObjectNumber"] == "NAT00000028"
     assert result["line_sources"][0]["source_field_id"] == "field-freight"
+
+
+def test_prepare_clickup_bc_sales_invoice_preview_treats_no_charge_markers_as_zero() -> None:
+    settings = InvoiceAutomationSettings(
+        **{
+            **make_settings().__dict__,
+            "charge_mappings": (
+                InvoiceChargeMapping(
+                    charge_name="Freight (Ocean/Truck/Air)",
+                    clickup_field_name="Freight (Ocean/Truck/Air)",
+                    clickup_field_id="field-freight",
+                    bc_item_number="INT000000026",
+                    bc_description="COORDINACION VIRTUAL DE TRANSPORTE MARITIMO",
+                    tax_group="NO IVA",
+                ),
+                InvoiceChargeMapping(
+                    charge_name="Almacenaje al cliente (USD)",
+                    clickup_field_name="Almacenaje al cliente (USD)",
+                    clickup_field_id="field-storage",
+                    bc_item_number="NAT00000034",
+                    bc_description="ALMACENAJES EN PUERTO",
+                    tax_group="IVA 12",
+                ),
+                InvoiceChargeMapping(
+                    charge_name="D&D al cliente (USD)",
+                    clickup_field_name="D&D al cliente (USD)",
+                    clickup_field_id="field-dnd",
+                    bc_item_number="NAT00000035",
+                    bc_description="DEMORAJE Y DETENCION",
+                    tax_group="IVA 12",
+                ),
+            ),
+        }
+    )
+    summary = make_clickup_summary(status="Listo para facturar")
+    summary["custom_fields"]["Freight (Ocean/Truck/Air)"] = {
+        "id": "field-freight",
+        "value": "100.50",
+    }
+    summary["custom_fields"]["Almacenaje al cliente (USD)"] = {
+        "id": "field-storage",
+        "value": "No almacenaje",
+    }
+    summary["custom_fields"]["D&D al cliente (USD)"] = {
+        "id": "field-dnd",
+        "value": "No D&D",
+    }
+
+    result = prepare_clickup_bc_sales_invoice_preview(
+        clickup_summary=summary,
+        bc_client=FakeBCInvoiceClient(),
+        settings=settings,
+        today=date(2026, 4, 8),
+    )
+
+    assert result["status"] == "dry_run_ready"
+    assert result["invoice_groups"] == ["INT"]
+    assert result["invoice_validation"]["expected_total"] == 100.5
+    assert [field["charge_name"] for field in result["invoice_validation"]["billable_fields"]] == [
+        "Freight (Ocean/Truck/Air)"
+    ]
 
 
 def test_prepare_clickup_bc_sales_invoice_preview_adds_shipment_metadata_for_template() -> None:
@@ -294,7 +495,7 @@ def test_prepare_clickup_bc_sales_invoice_preview_adds_shipment_metadata_for_tem
                     clickup_field_name="Freight (Ocean/Truck/Air)",
                     clickup_field_id="field-freight",
                     bc_item_number="INT000000026",
-                    bc_description="TRANSPORTE MARITIMO",
+                    bc_description="COORDINACION VIRTUAL DE TRANSPORTE MARITIMO",
                     tax_group="NO IVA",
                 ),
             ),
@@ -324,11 +525,60 @@ def test_prepare_clickup_bc_sales_invoice_preview_adds_shipment_metadata_for_tem
     }
     assert result["proposed_bc_payload"]["customerPurchaseOrderReference"] == "CI-20260323"
     assert len(result["proposed_bc_line_payloads"]) == 1
-    metadata_line = result["proposed_bc_invoices"][0]["proposed_bc_line_payloads"][0]
-    assert metadata_line == {
+    metadata_lines = result["proposed_bc_invoices"][0]["proposed_bc_line_payloads"][:2]
+    assert metadata_lines[0] == {
         "lineType": "Comment",
-        "description": "MTM META BOOKING TPEG23916500 CONTAINER TLLU6047125",
+        "description": "MTM META BOOKING TPEG23916500",
     }
+    assert metadata_lines[1] == {
+        "lineType": "Comment",
+        "description": "MTM META CONTAINER TLLU6047125",
+    }
+
+
+def test_prepare_clickup_bc_sales_invoice_preview_chunks_shipment_containers() -> None:
+    settings = InvoiceAutomationSettings.from_env()
+    summary = make_clickup_summary(status="Listo para facturar")
+    summary["custom_fields"]["Freight (Ocean/Truck/Air)"] = {
+        "id": "field-freight",
+        "value": "100.50",
+    }
+    summary["custom_fields"]["Booking number/"] = {"value": "TPEG23916500"}
+    summary["custom_fields"]["Container(s) number(s)/"] = {
+        "value": ", ".join(
+            [
+                "ONEU2864547",
+                "ONEU3304641",
+                "ONEU3304723",
+                "ONEU3304770",
+                "ONEU3304805",
+                "ONEU3304831",
+                "ONEU3304912",
+                "ONEU3305001",
+                "ONEU3305123",
+                "ONEU3305456",
+                "ONEU3305789",
+                "ONEU3305999",
+            ]
+        )
+    }
+
+    result = prepare_clickup_bc_sales_invoice_preview(
+        clickup_summary=summary,
+        bc_client=FakeBCInvoiceClient(),
+        settings=settings,
+        today=date(2026, 4, 8),
+    )
+
+    metadata_lines = [
+        line
+        for line in result["proposed_bc_invoices"][0]["proposed_bc_line_payloads"]
+        if line["lineType"] == "Comment"
+    ]
+    assert metadata_lines[0]["description"] == "MTM META BOOKING TPEG23916500"
+    assert len(metadata_lines) == 3
+    assert all(len(line["description"]) <= 100 for line in metadata_lines)
+    assert "ONEU3305999" in metadata_lines[-1]["description"]
 
 
 def test_prepare_clickup_bc_sales_invoice_preview_uses_custom_invoice_status() -> None:

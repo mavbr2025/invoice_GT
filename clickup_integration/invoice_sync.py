@@ -54,6 +54,7 @@ class InvoiceAutomationSettings:
     inland_account_number: str | None
     destination_account_number: str | None
     charge_mappings: tuple[InvoiceChargeMapping, ...] = ()
+    invoice_status_field_ids: tuple[str, ...] = ()
     eta_field_ids: tuple[str, ...] = ()
     bc_customer_name_field_names: tuple[str, ...] = ()
     bc_customer_name_field_ids: tuple[str, ...] = ()
@@ -85,6 +86,10 @@ class InvoiceAutomationSettings:
                     "Estatus de Facturacion",
                     "Invoice Status",
                 ),
+            ),
+            invoice_status_field_ids=_env_csv(
+                "CLICKUP_INVOICE_STATUS_FIELD_IDS",
+                default=("b436ff28-24d8-4a5a-9f7e-66623401dee1",),
             ),
             eta_field_names=_env_csv("CLICKUP_INVOICE_ETA_FIELD_NAMES", default=("ETA",)),
             eta_field_ids=_env_csv(
@@ -331,6 +336,47 @@ def prepare_clickup_bc_sales_invoice_preview(
     if customer_resolution["customer_number"]:
         customer_number = customer_resolution["customer_number"]
 
+    bc_customer = _resolve_bc_customer_card(
+        bc_client=bc_client,
+        market=market,
+        customer_id=customer_id,
+        customer_number=customer_number,
+    )
+    customer_currency = str((bc_customer or {}).get("currencyCode") or "").strip().upper()
+    if customer_currency and customer_currency != currency:
+        return {
+            "status": "customer_currency_mismatch",
+            "message": (
+                f"Business Central customer {customer_number or customer_id} is configured in "
+                f"{customer_currency}, but the ClickUp invoice currency is {currency}."
+            ),
+            "market": market,
+            "currency": currency,
+            "task_status": task_status,
+            "customer_resolution": {
+                **customer_resolution,
+                "bc_customer_currency": customer_currency,
+            },
+        }
+    if customer_id or customer_number:
+        customer_fel_readiness = _validate_customer_fel_readiness(
+            bc_client=bc_client,
+            bc_customer=bc_customer,
+            market=market,
+            customer_number=customer_number,
+            customer_id=customer_id,
+        )
+        if customer_fel_readiness["status"] != "ready":
+            return {
+                "status": "customer_fel_readiness_failed",
+                "message": customer_fel_readiness["message"],
+                "market": market,
+                "currency": currency,
+                "task_status": task_status,
+                "customer_resolution": customer_resolution,
+                "customer_fel_readiness": customer_fel_readiness,
+            }
+
     reference = _resolve_reference(clickup_summary, custom_fields, config)
     shipment_metadata = _resolve_shipment_metadata(clickup_summary, custom_fields, config)
     eta_date = _resolve_eta_date(clickup_summary, config)
@@ -508,6 +554,24 @@ def prepare_clickup_bc_sales_invoice_preview(
         split_by_item_prefix=bool(config.charge_mappings),
         shipment_metadata=shipment_metadata,
     )
+    invoice_validation = _validate_proposed_invoice_totals(
+        line_payloads=line_payloads,
+        line_sources=line_sources,
+        proposed_invoices=proposed_invoices,
+    )
+    if invoice_validation["status"] != "passed":
+        return {
+            "status": "invoice_validation_failed",
+            "message": "Mapped ClickUp billable fields do not reconcile to the proposed Business Central invoices.",
+            "market": market,
+            "currency": currency,
+            "task_status": task_status,
+            "reference": reference,
+            "invoice_validation": invoice_validation,
+            "proposed_bc_invoices": proposed_invoices,
+        }
+
+    duplicate_invoices: list[dict[str, Any]] = []
     for proposed_invoice in proposed_invoices:
         duplicate_check = _find_existing_invoice(
             bc_client=bc_client,
@@ -516,16 +580,28 @@ def prepare_clickup_bc_sales_invoice_preview(
             customer_number=customer_number or None,
         )
         if duplicate_check:
-            return {
-                "status": "duplicate_invoice",
-                "message": "A Business Central sales invoice already exists for this invoice group reference.",
-                "market": market,
-                "currency": currency,
-                "task_status": task_status,
-                "reference": proposed_invoice["proposed_bc_payload"]["externalDocumentNumber"],
-                "invoice_group": proposed_invoice["invoice_group"],
-                "existing_invoice": duplicate_check,
-            }
+            duplicate_invoices.append(
+                {
+                    "invoice_group": proposed_invoice["invoice_group"],
+                    "reference": proposed_invoice["proposed_bc_payload"]["externalDocumentNumber"],
+                    "existing_invoice": duplicate_check,
+                }
+            )
+
+    if duplicate_invoices:
+        return {
+            "status": "duplicate_invoice",
+            "message": "One or more Business Central sales invoices already exist for this shipment reference.",
+            "market": market,
+            "currency": currency,
+            "task_status": task_status,
+            "reference": duplicate_invoices[0]["reference"],
+            "invoice_group": duplicate_invoices[0]["invoice_group"],
+            "existing_invoice": duplicate_invoices[0]["existing_invoice"],
+            "duplicate_invoices": duplicate_invoices,
+            "invoice_validation": invoice_validation,
+            "proposed_bc_invoices": proposed_invoices,
+        }
 
     return {
         "status": "dry_run_ready",
@@ -544,6 +620,7 @@ def prepare_clickup_bc_sales_invoice_preview(
         "proposed_bc_payload": proposed_invoices[0]["proposed_bc_payload"],
         "proposed_bc_line_payloads": line_payloads,
         "line_sources": line_sources,
+        "invoice_validation": invoice_validation,
         "proposed_bc_invoices": proposed_invoices,
     }
 
@@ -680,38 +757,43 @@ def issue_clickup_bc_sales_invoice(
         today=today,
     )
     completed_stages: list[str] = []
-    if result.get("status") != "applied":
+    retry_existing_posted_invoices = _existing_duplicate_invoices_for_retry(result)
+    if result.get("status") != "applied" and not retry_existing_posted_invoices:
         return {**result, "completed_stages": completed_stages, "failed_stage": "create_sales_invoice"}
 
     config = settings or InvoiceAutomationSettings.from_env()
     market = result["market"]
-    completed_stages.append("create_sales_invoice")
+    completed_stages.append("reuse_existing_posted_invoice" if retry_existing_posted_invoices else "create_sales_invoice")
     posted_invoices: list[dict[str, Any]] = []
     finalized_invoices: list[dict[str, Any]] = []
     current_stage = "post_sales_invoice"
 
     try:
-        for created_invoice in result.get("created_invoices") or []:
-            invoice_group = created_invoice.get("invoice_group")
-            invoice_id = str(created_invoice.get("id") or "").strip()
-            if not invoice_id:
-                raise ValueError("Created invoice is missing its Business Central id.")
+        if retry_existing_posted_invoices:
+            current_stage = "reuse_existing_posted_invoice"
+            posted_invoices = retry_existing_posted_invoices
+        else:
+            for created_invoice in result.get("created_invoices") or []:
+                invoice_group = created_invoice.get("invoice_group")
+                invoice_id = str(created_invoice.get("id") or "").strip()
+                if not invoice_id:
+                    raise ValueError("Created invoice is missing its Business Central id.")
 
-            post_response = bc_client.post_sales_invoice(invoice_id, market=market)
-            posted_invoice = _resolve_posted_sales_invoice_after_post(
-                bc_client=bc_client,
-                created_invoice=created_invoice,
-                market=market,
-            )
-            posted_invoices.append(
-                {
-                    **posted_invoice,
-                    "invoice_group": invoice_group,
-                    "post_response": post_response,
-                }
-            )
+                post_response = bc_client.post_sales_invoice(invoice_id, market=market)
+                posted_invoice = _resolve_posted_sales_invoice_after_post(
+                    bc_client=bc_client,
+                    created_invoice=created_invoice,
+                    market=market,
+                )
+                posted_invoices.append(
+                    {
+                        **posted_invoice,
+                        "invoice_group": invoice_group,
+                        "post_response": post_response,
+                    }
+                )
 
-        completed_stages.append("post_sales_invoice")
+            completed_stages.append("post_sales_invoice")
 
         for posted_invoice in posted_invoices:
             current_stage = "sync_fel_descriptions"
@@ -724,23 +806,31 @@ def issue_clickup_bc_sales_invoice(
                 invoice_number=invoice_number,
                 market=market,
             )
-            sync_response = bc_client.sync_posted_invoice_fel_line_descriptions(
-                fel_row["id"],
-                market=market,
-            )
-            fel_row_after_sync = (
-                bc_client.get_posted_invoice_fel_description_by_number(invoice_number, market=market)
-                or fel_row
-            )
+            if _is_stamp_received(fel_row):
+                sync_response = {"status": "already_stamp_received"}
+                fel_row_after_sync = fel_row
+            else:
+                sync_response = bc_client.sync_posted_invoice_fel_line_descriptions(
+                    fel_row["id"],
+                    market=market,
+                )
+                fel_row_after_sync = (
+                    bc_client.get_posted_invoice_fel_description_by_number(invoice_number, market=market)
+                    or fel_row
+                )
             if "sync_fel_descriptions" not in completed_stages:
                 completed_stages.append("sync_fel_descriptions")
             current_stage = "stamp_fel_invoice"
-            stamp_response = bc_client.stamp_posted_invoice_fel(fel_row["id"], market=market)
-            fel_row_after_stamp = _wait_for_stamp_received(
-                bc_client=bc_client,
-                invoice_number=invoice_number,
-                market=market,
-            )
+            if _is_stamp_received(fel_row_after_sync):
+                stamp_response = {"status": "already_stamp_received"}
+                fel_row_after_stamp = fel_row_after_sync
+            else:
+                stamp_response = bc_client.stamp_posted_invoice_fel(fel_row["id"], market=market)
+                fel_row_after_stamp = _wait_for_stamp_received(
+                    bc_client=bc_client,
+                    invoice_number=invoice_number,
+                    market=market,
+                )
             posted_invoice_after_stamp = (
                 bc_client.get_entity("salesInvoices", posted_invoice["id"], market=market)
                 or posted_invoice
@@ -807,6 +897,36 @@ def issue_clickup_bc_sales_invoice(
         "posted_invoices": posted_invoices,
         "finalized_invoices": finalized_invoices,
     }
+
+
+def _existing_duplicate_invoices_for_retry(result: dict[str, Any]) -> list[dict[str, Any]]:
+    if result.get("status") != "duplicate_invoice":
+        return []
+
+    proposed_invoices = result.get("proposed_bc_invoices") or []
+    duplicate_invoices = result.get("duplicate_invoices") or []
+    if not proposed_invoices or len(duplicate_invoices) != len(proposed_invoices):
+        return []
+
+    posted_invoices: list[dict[str, Any]] = []
+    for duplicate in duplicate_invoices:
+        existing_invoice = duplicate.get("existing_invoice") or {}
+        invoice_number = str(existing_invoice.get("number") or "").strip()
+        if not _looks_posted_invoice_number(invoice_number):
+            return []
+        fel_row = existing_invoice.get("existing_fel_row") or {}
+        if _is_canceled_sales_invoice(existing_invoice):
+            return []
+        posted_invoices.append(
+            {
+                **existing_invoice,
+                "invoice_group": duplicate.get("invoice_group"),
+                "existing_fel_status": fel_row.get("electronicDocumentStatus"),
+                "retry_existing_posted_invoice": True,
+            }
+        )
+
+    return posted_invoices
 
 
 def _resolve_posted_sales_invoice_after_post(
@@ -888,16 +1008,14 @@ def _build_proposed_invoice_groups(
     split_by_item_prefix: bool,
     shipment_metadata: dict[str, str],
 ) -> list[dict[str, Any]]:
-    metadata_line = _build_shipment_metadata_line(shipment_metadata)
+    metadata_lines = _build_shipment_metadata_lines(shipment_metadata)
     if not split_by_item_prefix:
         return [
             {
                 "invoice_group": "ALL",
                 "reference": header_payload["externalDocumentNumber"],
                 "proposed_bc_payload": dict(header_payload),
-                "proposed_bc_line_payloads": [metadata_line, *line_payloads]
-                if metadata_line
-                else line_payloads,
+                "proposed_bc_line_payloads": [*metadata_lines, *line_payloads],
                 "line_sources": line_sources,
                 "total": _sum_line_amounts(line_payloads),
             }
@@ -924,9 +1042,7 @@ def _build_proposed_invoice_groups(
                 "invoice_group": group,
                 "reference": group_reference,
                 "proposed_bc_payload": group_header,
-                "proposed_bc_line_payloads": [metadata_line, *grouped_payloads[group]]
-                if metadata_line
-                else grouped_payloads[group],
+                "proposed_bc_line_payloads": [*metadata_lines, *grouped_payloads[group]],
                 "line_sources": grouped_sources[group],
                 "total": _sum_line_amounts(grouped_payloads[group]),
             }
@@ -963,6 +1079,100 @@ def _sum_line_amounts(line_payloads: list[dict[str, Any]]) -> float:
     return round(sum(float(line.get("unitPrice") or 0) for line in line_payloads), 2)
 
 
+def _validate_proposed_invoice_totals(
+    *,
+    line_payloads: list[dict[str, Any]],
+    line_sources: list[dict[str, Any]],
+    proposed_invoices: list[dict[str, Any]],
+) -> dict[str, Any]:
+    errors: list[str] = []
+    field_total = _sum_source_amounts(line_sources)
+    payload_total = _sum_line_amounts(line_payloads)
+    invoice_total = round(sum(float(invoice.get("total") or 0) for invoice in proposed_invoices), 2)
+    single_all_invoice = (
+        len(proposed_invoices) == 1
+        and str(proposed_invoices[0].get("invoice_group") or "").strip().upper() == "ALL"
+    )
+    if single_all_invoice:
+        fields_by_group = {"ALL": field_total}
+        invoices_by_group = {"ALL": invoice_total}
+    else:
+        fields_by_group = _sum_sources_by_group(line_sources)
+        invoices_by_group = {
+            str(invoice.get("invoice_group") or "OTHER").upper(): round(float(invoice.get("total") or 0), 2)
+            for invoice in proposed_invoices
+        }
+
+    if not _amounts_equal(field_total, payload_total):
+        errors.append(
+            f"Mapped field total {field_total:.2f} does not match BC line total {payload_total:.2f}."
+        )
+    if not _amounts_equal(field_total, invoice_total):
+        errors.append(
+            f"Mapped field total {field_total:.2f} does not match proposed invoice total {invoice_total:.2f}."
+        )
+
+    for group, amount in fields_by_group.items():
+        invoice_amount = invoices_by_group.get(group, 0.0)
+        if not _amounts_equal(amount, invoice_amount):
+            errors.append(
+                f"Mapped {group} total {amount:.2f} does not match proposed {group} invoice total {invoice_amount:.2f}."
+            )
+    for group, amount in invoices_by_group.items():
+        field_amount = fields_by_group.get(group, 0.0)
+        if not _amounts_equal(field_amount, amount):
+            errors.append(
+                f"Proposed {group} invoice total {amount:.2f} does not match mapped {group} total {field_amount:.2f}."
+            )
+
+    for invoice in proposed_invoices:
+        group = str(invoice.get("invoice_group") or "OTHER").upper()
+        source_total = _sum_source_amounts(invoice.get("line_sources") or [])
+        invoice_group_total = round(float(invoice.get("total") or 0), 2)
+        if not _amounts_equal(source_total, invoice_group_total):
+            errors.append(
+                f"Proposed {group} invoice line-source total {source_total:.2f} does not match header total {invoice_group_total:.2f}."
+            )
+
+    return {
+        "status": "failed" if errors else "passed",
+        "errors": errors,
+        "expected_total": field_total,
+        "line_payload_total": payload_total,
+        "proposed_invoice_total": invoice_total,
+        "expected_totals_by_group": fields_by_group,
+        "proposed_totals_by_group": invoices_by_group,
+        "billable_fields": [
+            {
+                "charge_name": source.get("charge_name"),
+                "invoice_group": source.get("invoice_group"),
+                "amount": round(float(source.get("amount") or 0), 2),
+                "source_field": source.get("source_field"),
+                "source_field_id": source.get("source_field_id"),
+                "item_number": source.get("item_number"),
+                "description": source.get("description"),
+            }
+            for source in line_sources
+        ],
+    }
+
+
+def _sum_source_amounts(line_sources: list[dict[str, Any]]) -> float:
+    return round(sum(float(source.get("amount") or 0) for source in line_sources), 2)
+
+
+def _sum_sources_by_group(line_sources: list[dict[str, Any]]) -> dict[str, float]:
+    totals: dict[str, float] = {}
+    for source in line_sources:
+        group = str(source.get("invoice_group") or "OTHER").upper()
+        totals[group] = round(totals.get(group, 0.0) + float(source.get("amount") or 0), 2)
+    return totals
+
+
+def _amounts_equal(left: float, right: float) -> bool:
+    return abs(round(left, 2) - round(right, 2)) < 0.01
+
+
 def _resolve_shipment_metadata(
     clickup_summary: dict[str, Any],
     custom_fields: dict[str, dict[str, Any]],
@@ -975,22 +1185,49 @@ def _resolve_shipment_metadata(
     }
 
 
-def _build_shipment_metadata_line(shipment_metadata: dict[str, str]) -> dict[str, Any] | None:
+def _build_shipment_metadata_lines(shipment_metadata: dict[str, str]) -> list[dict[str, Any]]:
     booking = _clean_marker_value(shipment_metadata.get("booking"))
     containers = _clean_marker_value(shipment_metadata.get("containers"))
-    if not booking and not containers:
-        return None
+    lines: list[dict[str, Any]] = []
 
-    parts = ["MTM META"]
     if booking:
-        parts.append(f"BOOKING {booking}")
+        lines.append(
+            {
+                "lineType": "Comment",
+                "description": _truncate_for_bc_description(f"MTM META BOOKING {booking}"),
+            }
+        )
     if containers:
-        parts.append(f"CONTAINER {containers}")
+        for chunk in _chunk_container_metadata(containers):
+            lines.append(
+                {
+                    "lineType": "Comment",
+                    "description": f"MTM META CONTAINER {chunk}",
+                }
+            )
 
-    return {
-        "lineType": "Comment",
-        "description": _truncate_for_bc_description(" ".join(parts)),
-    }
+    return lines
+
+
+def _chunk_container_metadata(containers: str) -> list[str]:
+    max_chunk_len = 100 - len("MTM META CONTAINER ")
+    tokens = [token.strip() for token in containers.replace("\n", ",").split(",") if token.strip()]
+    if not tokens:
+        return []
+
+    chunks: list[str] = []
+    current = ""
+    for token in tokens:
+        candidate = token if not current else f"{current}, {token}"
+        if len(candidate) <= max_chunk_len:
+            current = candidate
+            continue
+        if current:
+            chunks.append(current)
+        current = token[:max_chunk_len]
+    if current:
+        chunks.append(current)
+    return chunks
 
 
 def _clean_marker_value(value: str | None) -> str:
@@ -1032,14 +1269,17 @@ def _build_charge_input(
 
     amount = _parse_decimal(raw_value)
     if amount is None:
-        return {
-            "charge_name": charge_name,
-            "amount": None,
-            "account_number": account_number,
-            "description": description,
-            "source_field": source_field,
-            "error": f"Charge field {source_field or charge_name} has an invalid numeric value.",
-        }
+        if _is_zero_charge_marker(raw_value):
+            amount = Decimal("0")
+        else:
+            return {
+                "charge_name": charge_name,
+                "amount": None,
+                "account_number": account_number,
+                "description": description,
+                "source_field": source_field,
+                "error": f"Charge field {source_field or charge_name} has an invalid numeric value.",
+            }
 
     return {
         "charge_name": charge_name,
@@ -1073,16 +1313,19 @@ def _build_mapped_charge_input(
 
     amount = _parse_decimal(raw_value)
     if amount is None:
-        return {
-            "charge_name": mapping.charge_name,
-            "amount": None,
-            "item_number": mapping.bc_item_number,
-            "description": mapping.bc_description or mapping.charge_name,
-            "source_field": source_field,
-            "source_field_id": source_field_id,
-            "tax_group": mapping.tax_group,
-            "error": f"Charge field {source_field or mapping.charge_name} has an invalid numeric value.",
-        }
+        if _is_zero_charge_marker(raw_value):
+            amount = Decimal("0")
+        else:
+            return {
+                "charge_name": mapping.charge_name,
+                "amount": None,
+                "item_number": mapping.bc_item_number,
+                "description": mapping.bc_description or mapping.charge_name,
+                "source_field": source_field,
+                "source_field_id": source_field_id,
+                "tax_group": mapping.tax_group,
+                "error": f"Charge field {source_field or mapping.charge_name} has an invalid numeric value.",
+            }
 
     return {
         "charge_name": mapping.charge_name,
@@ -1122,7 +1365,136 @@ def _find_existing_invoice(
         )
     if not rows:
         return None
-    return rows[0]
+    for row in sorted(rows, key=_existing_invoice_retry_sort_key):
+        if _is_canceled_sales_invoice(row):
+            continue
+        invoice_number = str(row.get("number") or "").strip()
+        fel_row = (
+            bc_client.get_posted_invoice_fel_description_by_number(invoice_number, market=market)
+            if _looks_posted_invoice_number(invoice_number)
+            else None
+        )
+        return {**row, "existing_fel_row": fel_row}
+    return None
+
+
+def _existing_invoice_retry_sort_key(invoice: dict[str, Any]) -> tuple[int, str]:
+    number = str(invoice.get("number") or "")
+    posted_rank = 0 if _looks_posted_invoice_number(number) else 1
+    modified = str(invoice.get("lastModifiedDateTime") or invoice.get("postingDate") or invoice.get("invoiceDate") or "")
+    return posted_rank, modified
+
+
+def _is_canceled_sales_invoice(invoice: dict[str, Any]) -> bool:
+    status = " ".join(str(invoice.get("status") or "").strip().lower().split())
+    return status in {"canceled", "cancelled"}
+
+
+def _validate_customer_fel_readiness(
+    *,
+    bc_client: BusinessCentralClient,
+    bc_customer: dict[str, Any] | None,
+    market: str,
+    customer_number: str | None,
+    customer_id: str | None,
+) -> dict[str, Any]:
+    if market != "GT":
+        return {"status": "ready"}
+    if not bc_customer:
+        return {
+            "status": "missing_customer",
+            "message": (
+                f"Business Central customer {customer_number or customer_id or 'UNKNOWN'} could not be read "
+                "before FEL validation."
+            ),
+        }
+
+    resolved_customer_number = str(bc_customer.get("number") or customer_number or "").strip()
+    resolved_customer_id = str(bc_customer.get("id") or customer_id or "").strip()
+    try:
+        customer_invoicing = _read_customer_invoicing_fel_row(
+            bc_client=bc_client,
+            customer_number=resolved_customer_number,
+            customer_id=resolved_customer_id,
+            market=market,
+        )
+    except Exception as exc:
+        return {
+            "status": "customer_fel_readiness_api_unavailable",
+            "message": (
+                f"Business Central customer {resolved_customer_number or resolved_customer_id or 'UNKNOWN'} "
+                "could not be checked against the customer invoicing API before FEL issuance. "
+                f"Publish the customer invoicing API extension with FEL country fields or review BC access. Detail: {exc}"
+            ),
+            "customer_number": resolved_customer_number,
+            "customer_id": resolved_customer_id,
+        }
+
+    if not customer_invoicing:
+        return {
+            "status": "missing_customer_invoicing_row",
+            "message": (
+                f"Business Central customer {resolved_customer_number or resolved_customer_id or 'UNKNOWN'} "
+                "could not be found in the customer invoicing API before FEL issuance."
+            ),
+            "customer_number": resolved_customer_number,
+            "customer_id": resolved_customer_id,
+        }
+
+    resolved_fel_country = str(customer_invoicing.get("resolvedFelCountryCode") or "").strip().upper()
+    fel_country_ready = customer_invoicing.get("felCountryReady")
+    fel_pais = str(customer_invoicing.get("felPais") or "").strip().upper()
+    country_region_code = str(customer_invoicing.get("countryRegionCode") or "").strip().upper()
+    if "resolvedFelCountryCode" not in customer_invoicing or "felCountryReady" not in customer_invoicing:
+        return {
+            "status": "customer_fel_country_fields_not_exposed",
+            "message": (
+                f"Business Central customer {resolved_customer_number or resolved_customer_id or 'UNKNOWN'} "
+                "could not be validated because the customer invoicing API does not expose the FEL country fields. "
+                "Publish the updated customer invoicing extension before issuing invoices automatically."
+            ),
+            "customer_number": resolved_customer_number,
+            "customer_id": resolved_customer_id,
+            "customer_invoicing": customer_invoicing,
+        }
+    if fel_country_ready is False or not resolved_fel_country:
+        return {
+            "status": "missing_fel_country_source",
+            "message": (
+                f"Business Central customer {resolved_customer_number or resolved_customer_id or 'UNKNOWN'} "
+                "is missing the FEL/SAT Pais source. Update Pais or Country/Region Code on the customer card "
+                "before issuing invoices."
+            ),
+            "customer_number": resolved_customer_number,
+            "customer_id": resolved_customer_id,
+            "felPais": fel_pais,
+            "countryRegionCode": country_region_code,
+            "resolvedFelCountryCode": resolved_fel_country,
+        }
+    return {
+        "status": "ready",
+        "customer_number": resolved_customer_number,
+        "customer_id": resolved_customer_id,
+        "felPais": fel_pais,
+        "countryRegionCode": country_region_code,
+        "resolvedFelCountryCode": resolved_fel_country,
+    }
+
+
+def _read_customer_invoicing_fel_row(
+    *,
+    bc_client: BusinessCentralClient,
+    customer_number: str,
+    customer_id: str,
+    market: str,
+) -> dict[str, Any] | None:
+    if customer_number and hasattr(bc_client, "get_customer_invoicing_by_number"):
+        row = bc_client.get_customer_invoicing_by_number(customer_number, market=market)
+        if row:
+            return row
+    if customer_id and hasattr(bc_client, "get_customer_invoicing_by_id"):
+        return bc_client.get_customer_invoicing_by_id(customer_id, market=market)
+    return None
 
 
 def _resolve_reference(
@@ -1229,6 +1601,32 @@ def _resolve_invoice_customer(
     }
 
 
+def _resolve_bc_customer_card(
+    *,
+    bc_client: BusinessCentralClient,
+    market: str,
+    customer_id: str | None,
+    customer_number: str | None,
+) -> dict[str, Any] | None:
+    if customer_id:
+        return bc_client.get_customer_by_id(customer_id, market=market)
+    if not customer_number:
+        return None
+
+    escaped = customer_number.replace("'", "''")
+    rows = bc_client.find_entities(
+        "customers",
+        filters=f"number eq '{escaped}'",
+        top=2,
+        market=market,
+    )
+    if not rows:
+        return None
+    if len(rows) > 1:
+        raise ValueError(f"More than one Business Central customer matched {customer_number}.")
+    return rows[0]
+
+
 def _resolve_invoice_status(
     custom_fields: dict[str, dict[str, Any]],
     config: InvoiceAutomationSettings,
@@ -1249,6 +1647,23 @@ def _resolve_invoice_status(
                 "source": "custom_field",
                 "field_name": field_name,
                 "field_id": field.get("id"),
+                "ready_option_id": _dropdown_option_id(field, config.ready_status),
+            }
+
+    for field_id in config.invoice_status_field_ids:
+        field = _find_field_by_id(custom_fields, field_id)
+        if not field:
+            continue
+        resolved = resolve_dropdown_field(field)
+        label = ((resolved or {}).get("name") or "").strip()
+        raw = (field.get("value") if field.get("value") is not None else "")
+        status = label or str(raw).strip()
+        if status:
+            return {
+                "status": status,
+                "source": "custom_field_id",
+                "field_name": _field_name_by_id(custom_fields, field_id),
+                "field_id": field.get("id") or field_id,
                 "ready_option_id": _dropdown_option_id(field, config.ready_status),
             }
 
@@ -1411,7 +1826,7 @@ def _status_equals(left: str | None, right: str | None) -> bool:
 
 
 def _normalize_status(value: str | None) -> str:
-    return " ".join((value or "").strip().lower().replace("-", " ").split())
+    return "".join(char for char in (value or "").strip().lower() if char.isalnum())
 
 
 def _parse_date(value: Any) -> date | None:
@@ -1455,6 +1870,24 @@ def _parse_decimal(value: Any) -> Decimal | None:
         return Decimal(normalized)
     except InvalidOperation:
         return None
+
+
+def _is_zero_charge_marker(value: Any) -> bool:
+    normalized = " ".join(str(value or "").strip().casefold().split())
+    compact = "".join(ch for ch in normalized if ch.isalnum())
+    if not normalized.startswith("no"):
+        return False
+    return any(
+        marker in compact
+        for marker in (
+            "noalmacenaje",
+            "nodd",
+            "nodandd",
+            "nodyd",
+            "nodemurrage",
+            "nodetention",
+        )
+    )
 
 
 def load_invoice_charge_mappings(path: str | os.PathLike[str]) -> tuple[InvoiceChargeMapping, ...]:

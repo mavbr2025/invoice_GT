@@ -27,14 +27,6 @@ from clickup_integration.invoice_sync import (
 from clickup_integration.mapping import summarize_task_for_customer_mapping
 from clickup_integration.matcher import match_clickup_customer_to_bc
 from clickup_integration.writeback import prepare_clickup_bc_writeback
-from whatsapp_integration.booking_intake import BookingTarget, process_whatsapp_booking_intake
-from whatsapp_integration.config import WhatsAppSettings
-from whatsapp_integration.provider import (
-    normalize_twilio_inbound,
-    validate_twilio_request_signature,
-)
-from whatsapp_integration.router import route_customer_message
-
 
 app = FastAPI(title="ClickUp to Business Central Customer Bridge")
 logging.basicConfig(level=logging.INFO)
@@ -56,9 +48,15 @@ def invoice_sync_readiness() -> dict[str, Any]:
             "status": "not_ready",
             "message": str(exc),
         }
+    missing_runtime_config = [
+        name
+        for name in ("CLICKUP_WEBHOOK_TOKEN", "CLICKUP_ACCESS_TOKEN")
+        if not os.getenv(name, "").strip()
+    ]
 
     return {
-        "status": "ready",
+        "status": "not_ready" if missing_runtime_config else "ready",
+        "missing_runtime_config": missing_runtime_config,
         "market": settings.supported_market,
         "currency": settings.supported_currency,
         "apply_mode": _env_bool("CLICKUP_INVOICE_WEBHOOK_APPLY", default=False),
@@ -75,6 +73,14 @@ async def whatsapp_inbound(
     x_twilio_signature: str | None = Header(default=None, alias="X-Twilio-Signature"),
 ) -> dict[str, Any]:
     try:
+        from whatsapp_integration.booking_intake import BookingTarget, process_whatsapp_booking_intake
+        from whatsapp_integration.config import WhatsAppSettings
+        from whatsapp_integration.provider import (
+            normalize_twilio_inbound,
+            validate_twilio_request_signature,
+        )
+        from whatsapp_integration.router import route_customer_message
+
         form_payload = await _safe_form_urlencoded(request)
 
         settings = WhatsAppSettings.from_env(
@@ -617,8 +623,7 @@ def _fetch_clickup_task_for_webhook(
         inferred_team_id = _infer_clickup_team_id(clickup)
         if inferred_team_id:
             attempts.append((True, inferred_team_id))
-    if not custom_task_ids:
-        attempts.append((False, None))
+    attempts.append((False, None))
 
     seen: set[tuple[bool, str | None]] = set()
     for attempt_custom_ids, attempt_team_id in attempts:
@@ -830,14 +835,17 @@ def _with_updated_custom_field_value(
 
 
 def _log_webhook_result(*, task_id: str | None, result: dict[str, Any]) -> None:
+    result_payload = result.get("result") if isinstance(result.get("result"), dict) else {}
     logger.info(
-        "Webhook result task_id=%s status=%s action=%s reason=%s result_status=%s result_message=%s",
+        "Webhook result task_id=%s status=%s action=%s reason=%s task_status=%s result_status=%s result_message=%s status_source=%s",
         task_id,
         result.get("status"),
         result.get("action"),
         result.get("reason"),
-        (result.get("result") or {}).get("status") if isinstance(result.get("result"), dict) else None,
-        (result.get("result") or {}).get("message") if isinstance(result.get("result"), dict) else None,
+        result.get("task_status") or result_payload.get("task_status"),
+        result_payload.get("status"),
+        result_payload.get("message"),
+        result_payload.get("status_source"),
     )
 
 

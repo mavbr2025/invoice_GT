@@ -43,6 +43,21 @@ page 71007 "MTM Posted Inv FEL Desc API"
                     Caption = 'External Document Number';
                     Editable = false;
                 }
+                field(paymentTermsCode; Rec."Payment Terms Code")
+                {
+                    Caption = 'Payment Terms Code';
+                    Editable = false;
+                }
+                field(paymentMethodCode; Rec."Payment Method Code")
+                {
+                    Caption = 'Payment Method Code';
+                    Editable = false;
+                }
+                field(cfdiRelation; GetDynamicFieldText('CFDI Relation'))
+                {
+                    Caption = 'CFDI Relation';
+                    Editable = false;
+                }
                 field(systemModifiedAt; Rec.SystemModifiedAt)
                 {
                     Caption = 'System Modified At';
@@ -71,6 +86,16 @@ page 71007 "MTM Posted Inv FEL Desc API"
                 field(errorDescription; GetDynamicFieldText('Error Description'))
                 {
                     Caption = 'Error Description';
+                    Editable = false;
+                }
+                field(errorCode; GetDynamicFieldText('Error Code'))
+                {
+                    Caption = 'Error Code';
+                    Editable = false;
+                }
+                field(mxStampReadiness; BuildMxStampReadinessSummary())
+                {
+                    Caption = 'MX Stamp Readiness';
                     Editable = false;
                 }
                 field(cancelled; Rec.Cancelled)
@@ -183,6 +208,19 @@ page 71007 "MTM Posted Inv FEL Desc API"
     end;
 
     [ServiceEnabled]
+    procedure CancelFelInvoiceWithMotiveAndIssueDateTime(motiveText: Text; issueDateTimeText: Text; var ActionContext: WebServiceActionContext)
+    var
+        GTFelMgt: Codeunit "MTM GT Posted Inv FEL Mgt";
+    begin
+        GTFelMgt.CancelPostedInvoiceWithMotiveAndIssueDateTime(Rec, motiveText, issueDateTimeText);
+
+        ActionContext.SetObjectType(ObjectType::Page);
+        ActionContext.SetObjectId(Page::"MTM Posted Inv FEL Desc API");
+        ActionContext.AddEntityKey(Rec.FieldNo(SystemId), Rec.SystemId);
+        ActionContext.SetResultCode(WebServiceActionResultCode::Updated);
+    end;
+
+    [ServiceEnabled]
     procedure CancelPostedInvoiceAndFelWithMotive(motiveText: Text; var ActionContext: WebServiceActionContext)
     var
         CorrectPostedSalesInvoice: Codeunit "Correct Posted Sales Invoice";
@@ -194,6 +232,67 @@ page 71007 "MTM Posted Inv FEL Desc API"
         end;
 
         GTFelMgt.CancelPostedInvoiceWithMotive(Rec, motiveText);
+
+        ActionContext.SetObjectType(ObjectType::Page);
+        ActionContext.SetObjectId(Page::"MTM Posted Inv FEL Desc API");
+        ActionContext.AddEntityKey(Rec.FieldNo(SystemId), Rec.SystemId);
+        ActionContext.SetResultCode(WebServiceActionResultCode::Updated);
+    end;
+
+    [ServiceEnabled]
+    procedure CancelPostedInvoiceAndFelWithMotiveAndIssueDateTime(motiveText: Text; issueDateTimeText: Text; var ActionContext: WebServiceActionContext)
+    var
+        CorrectPostedSalesInvoice: Codeunit "Correct Posted Sales Invoice";
+        GTFelMgt: Codeunit "MTM GT Posted Inv FEL Mgt";
+    begin
+        if not Rec.Cancelled then begin
+            CorrectPostedSalesInvoice.CancelPostedInvoice(Rec);
+            Rec.Get(Rec."No.");
+        end;
+
+        GTFelMgt.CancelPostedInvoiceWithMotiveAndIssueDateTime(Rec, motiveText, issueDateTimeText);
+
+        ActionContext.SetObjectType(ObjectType::Page);
+        ActionContext.SetObjectId(Page::"MTM Posted Inv FEL Desc API");
+        ActionContext.AddEntityKey(Rec.FieldNo(SystemId), Rec.SystemId);
+        ActionContext.SetResultCode(WebServiceActionResultCode::Updated);
+    end;
+
+    [ServiceEnabled]
+    procedure SetMxSubstitutionRelation(oldInvoiceNumber: Text; var ActionContext: WebServiceActionContext)
+    var
+        MXCfdiMgt: Codeunit "MTM MX Posted Inv CFDI Mgt";
+    begin
+        MXCfdiMgt.SetSubstitutionRelation(Rec, CopyStr(oldInvoiceNumber, 1, MaxStrLen(Rec."No.")));
+
+        ActionContext.SetObjectType(ObjectType::Page);
+        ActionContext.SetObjectId(Page::"MTM Posted Inv FEL Desc API");
+        ActionContext.AddEntityKey(Rec.FieldNo(SystemId), Rec.SystemId);
+        ActionContext.SetResultCode(WebServiceActionResultCode::Updated);
+    end;
+
+    [ServiceEnabled]
+    procedure StampMxInvoice(var ActionContext: WebServiceActionContext)
+    var
+        MXCfdiMgt: Codeunit "MTM MX Posted Inv CFDI Mgt";
+    begin
+        MXCfdiMgt.StampMxInvoice(Rec);
+
+        ActionContext.SetObjectType(ObjectType::Page);
+        ActionContext.SetObjectId(Page::"MTM Posted Inv FEL Desc API");
+        ActionContext.AddEntityKey(Rec.FieldNo(SystemId), Rec.SystemId);
+        ActionContext.SetResultCode(WebServiceActionResultCode::Updated);
+    end;
+
+    [ServiceEnabled]
+    procedure CancelMxInvoiceWithSubstitution(substitutionInvoiceNumber: Text; cancellationReasonId: Text; var ActionContext: WebServiceActionContext)
+    var
+        MXCfdiMgt: Codeunit "MTM MX Posted Inv CFDI Mgt";
+    begin
+        MXCfdiMgt.CancelMxInvoiceWithSubstitution(
+            Rec,
+            CopyStr(substitutionInvoiceNumber, 1, MaxStrLen(Rec."No.")),
+            cancellationReasonId);
 
         ActionContext.SetObjectType(ObjectType::Page);
         ActionContext.SetObjectId(Page::"MTM Posted Inv FEL Desc API");
@@ -223,6 +322,72 @@ page 71007 "MTM Posted Inv FEL Desc API"
         FieldRef.Value(FieldValue);
         RecRef.Modify();
         Rec.Get(Rec."No.");
+    end;
+
+    local procedure BuildMxStampReadinessSummary(): Text
+    var
+        PaymentMethod: Record "Payment Method";
+        PaymentTerms: Record "Payment Terms";
+        SalesInvoiceLine: Record "Sales Invoice Line";
+        RelationDocRef: RecordRef;
+        MissingDescriptionXLCount: Integer;
+        RelationCount: Integer;
+        LineCount: Integer;
+        SatMethodOfPayment: Text;
+        SatPaymentTerm: Text;
+    begin
+        if PaymentTerms.Get(Rec."Payment Terms Code") then
+            SatPaymentTerm := Format(GetRecordFieldValue(PaymentTerms, 'SAT Payment Term'));
+        if PaymentMethod.Get(Rec."Payment Method Code") then
+            SatMethodOfPayment := Format(GetRecordFieldValue(PaymentMethod, 'SAT Method of Payment'));
+
+        SalesInvoiceLine.SetRange("Document No.", Rec."No.");
+        SalesInvoiceLine.SetRange(Type, SalesInvoiceLine.Type::Item);
+        if SalesInvoiceLine.FindSet() then
+            repeat
+                LineCount += 1;
+                if DelChr(Format(GetRecordFieldValue(SalesInvoiceLine, 'Description XL')), '=', ' ') = '' then
+                    MissingDescriptionXLCount += 1;
+            until SalesInvoiceLine.Next() = 0;
+
+        RelationDocRef.Open(27006);
+        SetFieldFilter(RelationDocRef, 'Document No.', Rec."No.");
+        if RelationDocRef.FindSet() then
+            repeat
+                RelationCount += 1;
+            until RelationDocRef.Next() = 0;
+
+        exit(
+            StrSubstNo(
+                'PaymentTerms=%1;SATPaymentTerm=%2;PaymentMethod=%3;SATMethodOfPayment=%4;CFDIRelation=%5;RelationRows=%6;ItemLines=%7;MissingDescriptionXL=%8',
+                Rec."Payment Terms Code",
+                SatPaymentTerm,
+                Rec."Payment Method Code",
+                SatMethodOfPayment,
+                GetDynamicFieldText('CFDI Relation'),
+                RelationCount,
+                LineCount,
+                MissingDescriptionXLCount));
+    end;
+
+    local procedure GetRecordFieldValue(RecVariant: Variant; FieldName: Text): Text
+    var
+        RecRef: RecordRef;
+        FieldRef: FieldRef;
+    begin
+        RecRef.GetTable(RecVariant);
+        if not TryGetFieldByName(RecRef, FieldName, FieldRef) then
+            exit('');
+
+        exit(Format(FieldRef.Value()));
+    end;
+
+    local procedure SetFieldFilter(var RecRef: RecordRef; FieldName: Text; FieldValue: Text)
+    var
+        FieldRef: FieldRef;
+    begin
+        TryGetFieldByName(RecRef, FieldName, FieldRef);
+        FieldRef.SetRange(FieldValue);
     end;
 
     [TryFunction]
