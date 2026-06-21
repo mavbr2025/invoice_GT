@@ -59,3 +59,26 @@ Recommended invoice readiness path:
 - The code does not use the legacy FEL customer-send action. It stamps through BC/FEL and downloads the Business Central `pdfDocument`.
 - Configure secrets through AWS App Runner/ECS environment variables or Secrets Manager, not through files committed to git.
 
+## Manual Special Requirements
+
+Customer-specific invoice exceptions are documented under:
+
+```text
+config/special_invoice_requirements/
+```
+
+The current special request is `gt_int_two_step_special_request`: split the INT portion of an approved GT shipment into two manually issued INT invoices, one for `Freight (Ocean/Truck/Air)` and one for `Emergency Surcharge`.
+
+This is intentionally not wired to the ClickUp webhook. Packaging `scripts/` into the image only preserves the controlled manual tooling for an operator with shell access; it does not expose a route, scheduler, or automatic trigger.
+
+Example manual command:
+
+```bash
+python scripts/replace_gt_invoice_split_int_charges_once.py \
+  --task-id MTMLXGT-21971 \
+  --team-id 8451352 \
+  --old-invoice GTFVR0003921 \
+  --issue-datetime 'GTFVR0003921=2026-06-12T01:25:19'
+```
+
+Do not automate this command until the requirement is promoted out of `manual_special_request_only`.

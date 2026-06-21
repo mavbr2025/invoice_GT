@@ -1,0 +1,66 @@
+{
+  "id": "gt_int_two_step_special_request",
+  "name": "GT INT two-step invoice special request",
+  "status": "manual_special_request_only",
+  "automated": false,
+  "webhook_enabled": false,
+  "customer_specific": true,
+  "market": "GT",
+  "invoice_group": "INT",
+  "requirement": "For approved customer-specific exceptions, issue the INT portion of one shipment as two separate Business Central invoices instead of one combined INT invoice.",
+  "source_script": "scripts/replace_gt_invoice_split_int_charges_once.py",
+  "trigger_policy": {
+    "allowed_trigger": "manual_operator_command",
+    "blocked_triggers": [
+      "ClickUp webhook",
+      "automatic invoice issuance",
+      "scheduled job"
+    ],
+    "reason": "The requirement is still being defined and must not be automated until the business rule is approved."
+  },
+  "split_strategy": {
+    "basis": "ClickUp billable charge names resolved by the standard GT invoice mapping preview",
+    "source_invoice_group": "INT",
+    "output_invoice_count": 2,
+    "preserve_bc_numbering": true,
+    "preserve_standard_pdf_delivery": true
+  },
+  "splits": [
+    {
+      "invoice_label": "INT ocean freight management",
+      "reference_suffix": "",
+      "charge_names": [
+        "Freight (Ocean/Truck/Air)"
+      ],
+      "expected_bc_item_prefix": "INT"
+    },
+    {
+      "invoice_label": "INT emergency surcharge",
+      "reference_suffix": "-2",
+      "charge_names": [
+        "Emergency Surcharge"
+      ],
+      "expected_bc_item_prefix": "INT"
+    }
+  ],
+  "delivery_policy": {
+    "clickup_file_field": "Invoice to Client",
+    "clickup_file_field_id": "5d67859a-1ae0-4cda-9f57-2a89bf1ff259",
+    "attachment_behavior": "replace_with_active_split_invoice_pdfs",
+    "write_bc_references_comment": true,
+    "mark_facturada_when_status_field_exists": true
+  },
+  "safety_controls": [
+    "Requires an explicit old invoice number when replacing an existing invoice.",
+    "Cancels the old BC/FEL invoice before creating the split replacements.",
+    "Blocks if an active replacement invoice exists with a total that does not match the expected split total.",
+    "Reuses already-created active replacement invoices when rerun after a partial failure.",
+    "Requires manual issue datetime override if FEL rejects cancellation because the SAT registered issue datetime differs from BC.",
+    "Does not add or expose a webhook/API endpoint for this flow."
+  ],
+  "known_validation_case": {
+    "shipment_task_id": "MTMLXGT-21971",
+    "old_invoice": "GTFVR0003921",
+    "notes": "The original request came through DISPUTE-441, but the shipment source of truth is MTMLXGT-21971."
+  }
+}
