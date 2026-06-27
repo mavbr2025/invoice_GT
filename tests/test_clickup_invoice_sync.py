@@ -424,6 +424,181 @@ def test_prepare_clickup_bc_sales_invoice_preview_uses_charge_mapping_items() ->
     assert result["line_sources"][0]["source_field_id"] == "field-freight"
 
 
+def test_prepare_clickup_bc_sales_invoice_preview_rewrites_air_freight_description() -> None:
+    settings = InvoiceAutomationSettings(
+        **{
+            **make_settings().__dict__,
+            "charge_mappings": (
+                InvoiceChargeMapping(
+                    charge_name="Freight (Ocean/Truck/Air)",
+                    clickup_field_name="Freight (Ocean/Truck/Air)",
+                    clickup_field_id="field-freight",
+                    bc_item_number="INT000000026",
+                    bc_description="COORDINACION VIRTUAL DE TRANSPORTE MARITIMO",
+                    tax_group="NO IVA",
+                ),
+            ),
+        }
+    )
+    summary = make_clickup_summary(status="Listo para facturar")
+    summary["custom_fields"]["Product/"] = {
+        "id": "field-product",
+        "type": "drop_down",
+        "value": 6,
+        "type_config": {"options": [{"id": "product-air", "name": "AIR", "orderindex": 6}]},
+    }
+    summary["custom_fields"]["Freight (Ocean/Truck/Air)"] = {
+        "id": "field-freight",
+        "value": "100.50",
+    }
+    summary["custom_fields"]["Agent's Reference"] = {"id": "field-agent-reference", "value": "BK93327"}
+    summary["custom_fields"]["Container(s) number(s)/"] = {"value": "MTMLXGT-26251"}
+
+    result = prepare_clickup_bc_sales_invoice_preview(
+        clickup_summary=summary,
+        bc_client=FakeBCInvoiceClient(),
+        settings=settings,
+        today=date(2026, 4, 8),
+    )
+
+    assert result["status"] == "dry_run_ready"
+    assert result["product_validation"]["product"]["name"] == "AIR"
+    assert result["product_validation"]["failures"] == []
+    assert result["product_validation"]["warnings"] == []
+    assert result["line_sources"][0]["description"] == "COORDINACION VIRTUAL DE TRANSPORTE AEREO"
+    assert result["line_sources"][0]["description_override"] == {
+        "reason": "air_product_freight_description",
+        "original_description": "COORDINACION VIRTUAL DE TRANSPORTE MARITIMO",
+    }
+    assert result["shipment_metadata"]["awb"] == "BK93327"
+    assert result["proposed_bc_invoices"][0]["proposed_bc_line_payloads"][0]["description"] == "MTM META PRODUCT AIR"
+    assert result["proposed_bc_invoices"][0]["proposed_bc_line_payloads"][1]["description"] == "MTM META AWB BK93327"
+    assert result["proposed_bc_invoices"][0]["proposed_bc_line_payloads"][2]["description"] == (
+        "COORDINACION VIRTUAL DE TRANSPORTE AEREO"
+    )
+
+
+def test_prepare_clickup_bc_sales_invoice_preview_blocks_air_product_without_awb() -> None:
+    settings = InvoiceAutomationSettings(
+        **{
+            **make_settings().__dict__,
+            "charge_mappings": (
+                InvoiceChargeMapping(
+                    charge_name="Freight (Ocean/Truck/Air)",
+                    clickup_field_name="Freight (Ocean/Truck/Air)",
+                    clickup_field_id="field-freight",
+                    bc_item_number="INT000000026",
+                    bc_description="COORDINACION VIRTUAL DE TRANSPORTE MARITIMO",
+                    tax_group="NO IVA",
+                ),
+            ),
+        }
+    )
+    summary = make_clickup_summary(status="Listo para facturar")
+    summary["custom_fields"]["Product/"] = {
+        "id": "field-product",
+        "type": "drop_down",
+        "value": 6,
+        "type_config": {"options": [{"id": "product-air", "name": "AIR", "orderindex": 6}]},
+    }
+    summary["custom_fields"]["Freight (Ocean/Truck/Air)"] = {
+        "id": "field-freight",
+        "value": "100.50",
+    }
+
+    result = prepare_clickup_bc_sales_invoice_preview(
+        clickup_summary=summary,
+        bc_client=FakeBCInvoiceClient(),
+        settings=settings,
+        today=date(2026, 4, 8),
+    )
+
+    assert result["status"] == "product_validation_failed"
+    assert result["product_validation"]["failures"][0]["reason"] == "air_product_missing_awb"
+
+
+def test_prepare_clickup_bc_sales_invoice_preview_still_blocks_other_air_ocean_wording() -> None:
+    settings = InvoiceAutomationSettings(
+        **{
+            **make_settings().__dict__,
+            "charge_mappings": (
+                InvoiceChargeMapping(
+                    charge_name="Origin Charges",
+                    clickup_field_name="Origin Charges",
+                    clickup_field_id="field-origin",
+                    bc_item_number="INT000000011",
+                    bc_description="OCEAN ORIGIN CHARGES",
+                    tax_group="NO IVA",
+                ),
+            ),
+        }
+    )
+    summary = make_clickup_summary(status="Listo para facturar")
+    summary["custom_fields"]["Product/"] = {
+        "id": "field-product",
+        "type": "drop_down",
+        "value": 6,
+        "type_config": {"options": [{"id": "product-air", "name": "AIR", "orderindex": 6}]},
+    }
+    summary["custom_fields"]["Origin Charges"] = {
+        "id": "field-origin",
+        "value": "100.50",
+    }
+
+    result = prepare_clickup_bc_sales_invoice_preview(
+        clickup_summary=summary,
+        bc_client=FakeBCInvoiceClient(),
+        settings=settings,
+        today=date(2026, 4, 8),
+    )
+
+    assert result["status"] == "product_validation_failed"
+    assert result["product_validation"]["failures"][0]["source_field"] == "Origin Charges"
+    assert result["product_validation"]["failures"][0]["item_number"] == "INT000000011"
+    assert result["product_validation"]["failures"][0]["matched_terms"] == ["OCEAN"]
+
+
+def test_prepare_clickup_bc_sales_invoice_preview_allows_air_product_with_air_description() -> None:
+    settings = InvoiceAutomationSettings(
+        **{
+            **make_settings().__dict__,
+            "charge_mappings": (
+                InvoiceChargeMapping(
+                    charge_name="Air Freight",
+                    clickup_field_name="Freight (Ocean/Truck/Air)",
+                    clickup_field_id="field-freight",
+                    bc_item_number="INT000000026",
+                    bc_description="COORDINACION VIRTUAL DE TRANSPORTE AEREO",
+                    tax_group="NO IVA",
+                ),
+            ),
+        }
+    )
+    summary = make_clickup_summary(status="Listo para facturar")
+    summary["custom_fields"]["Product/"] = {
+        "id": "field-product",
+        "type": "drop_down",
+        "value": 6,
+        "type_config": {"options": [{"id": "product-air", "name": "AIR", "orderindex": 6}]},
+    }
+    summary["custom_fields"]["Freight (Ocean/Truck/Air)"] = {
+        "id": "field-freight",
+        "value": "100.50",
+    }
+    summary["custom_fields"]["Agent's Reference"] = {"id": "field-agent-reference", "value": "BK93327"}
+
+    result = prepare_clickup_bc_sales_invoice_preview(
+        clickup_summary=summary,
+        bc_client=FakeBCInvoiceClient(),
+        settings=settings,
+        today=date(2026, 4, 8),
+    )
+
+    assert result["status"] == "dry_run_ready"
+    assert result["product_validation"]["status"] == "passed"
+    assert result["line_sources"][0]["description"] == "COORDINACION VIRTUAL DE TRANSPORTE AEREO"
+
+
 def test_prepare_clickup_bc_sales_invoice_preview_treats_no_charge_markers_as_zero() -> None:
     settings = InvoiceAutomationSettings(
         **{
@@ -522,6 +697,8 @@ def test_prepare_clickup_bc_sales_invoice_preview_adds_shipment_metadata_for_tem
         "shipment_number": "CI-20260323",
         "booking": "TPEG23916500",
         "containers": "TLLU6047125",
+        "product": "",
+        "awb": "",
     }
     assert result["proposed_bc_payload"]["customerPurchaseOrderReference"] == "CI-20260323"
     assert len(result["proposed_bc_line_payloads"]) == 1

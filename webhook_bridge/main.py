@@ -519,6 +519,121 @@ async def clickup_invoice_sync(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@app.post("/clickup/webhooks/invoice-delivery-recovery")
+@app.post("/clickup/webhooks/invoice-sync/deliver-posted")
+async def clickup_invoice_deliver_posted(
+    request: Request,
+    x_webhook_token: str | None = Header(default=None, alias="X-Webhook-Token"),
+    authorization: str | None = Header(default=None, alias="Authorization"),
+) -> dict[str, Any]:
+    expected_token = os.getenv("CLICKUP_WEBHOOK_TOKEN", "").strip()
+    if not expected_token:
+        raise HTTPException(status_code=500, detail="CLICKUP_WEBHOOK_TOKEN is not configured.")
+    provided_token = _extract_webhook_token(
+        x_webhook_token=x_webhook_token,
+        authorization=authorization,
+    )
+    if provided_token != expected_token:
+        raise HTTPException(status_code=401, detail="Invalid webhook token.")
+
+    payload = await _safe_json(request)
+    task_id = extract_task_id(payload)
+    invoice_numbers = _extract_invoice_numbers(payload)
+    if not task_id or not invoice_numbers:
+        raise HTTPException(
+            status_code=400,
+            detail="task_id and invoice_numbers are required for posted-invoice delivery recovery.",
+        )
+
+    try:
+        clickup = ClickUpClient(ClickUpSettings.from_env())
+        bc = BusinessCentralClient(BusinessCentralSettings.from_env())
+        settings = InvoiceAutomationSettings.from_env()
+        market = settings.supported_market
+        team_id = _resolve_clickup_team_id(clickup)
+        use_custom_task_ids = _env_bool("CLICKUP_WEBHOOK_CUSTOM_TASK_IDS", default=True)
+        task = _fetch_clickup_task_for_webhook(
+            clickup=clickup,
+            task_id=task_id,
+            custom_task_ids=use_custom_task_ids,
+            team_id=team_id,
+        )
+        if task is None:
+            raise HTTPException(status_code=404, detail=f"ClickUp task was not found: {task_id}")
+
+        summary = summarize_task_for_customer_mapping(task)
+        finalized_invoices = []
+        for invoice_number in invoice_numbers:
+            posted_invoice = bc.get_posted_sales_invoice_by_number(invoice_number, market=market)
+            if not posted_invoice:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Business Central posted invoice was not found: {invoice_number}",
+                )
+            fel_row = bc.get_posted_invoice_fel_description_by_number(invoice_number, market=market)
+            fel_status = str((fel_row or {}).get("electronicDocumentStatus") or "").strip()
+            if fel_status.lower() != "stamp received":
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Invoice {invoice_number} cannot be delivered because FEL status is "
+                        f"{fel_status or 'not available'}."
+                    ),
+                )
+
+            reference = str(posted_invoice.get("externalDocumentNumber") or "").upper()
+            invoice_group = "INT" if "-INT" in reference else "NAT" if "-NAT" in reference else "ALL"
+            finalized_invoices.append(
+                {
+                    "invoice_group": invoice_group,
+                    "number": invoice_number,
+                    "externalDocumentNumber": posted_invoice.get("externalDocumentNumber"),
+                    "posted_invoice_after_stamp": {
+                        **posted_invoice,
+                        "invoice_group": invoice_group,
+                    },
+                    "custom_api_row_after_stamp": fel_row,
+                    "delivery_recovery": True,
+                }
+            )
+
+        invoice_result = {
+            "status": "applied",
+            "market": market,
+            "task_id": summary.get("task_id"),
+            "finalized_invoices": finalized_invoices,
+            "created_invoices": [],
+            "completed_stages": ["deliver_existing_posted_invoice"],
+        }
+        delivery_result = finalize_clickup_issued_invoices(
+            clickup=clickup,
+            bc_client=bc,
+            clickup_summary=summary,
+            invoice_result=invoice_result,
+            settings=settings,
+            workspace_id=team_id,
+            mark_status=True,
+        )
+        result = {
+            **invoice_result,
+            "status": "delivered",
+            "delivery": delivery_result,
+            "final_status_update": delivery_result.get("final_status_update"),
+        }
+        response = {
+            "status": "processed",
+            "action": "deliver_existing_posted_invoices",
+            "result": result,
+        }
+        _log_webhook_result(task_id=task_id, result=response)
+        return response
+    except HTTPException:
+        raise
+    except Exception as exc:  # pragma: no cover - exercised in runtime recovery
+        logger.exception("ClickUp posted invoice delivery recovery failed for task_id=%s", task_id)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 def _write_invoice_error_comment(
     *,
     clickup: ClickUpClient,
@@ -685,6 +800,32 @@ def extract_task_id(payload: dict[str, Any]) -> str | None:
         if candidate is not None and str(candidate).strip():
             return str(candidate).strip()
     return None
+
+
+def _extract_invoice_numbers(payload: dict[str, Any]) -> list[str]:
+    raw_value = (
+        payload.get("invoice_numbers")
+        or payload.get("invoiceNumbers")
+        or payload.get("Invoice Numbers")
+        or payload.get("invoice_number")
+        or payload.get("invoiceNumber")
+    )
+    if raw_value is None:
+        return []
+
+    values = raw_value if isinstance(raw_value, list) else str(raw_value).replace(";", ",").split(",")
+    invoice_numbers: list[str] = []
+    for value in values:
+        text = str(value or "").strip().upper()
+        if not text:
+            continue
+        if not text.startswith("GTFVR"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Only posted GT invoice numbers are supported for delivery recovery: {text}",
+            )
+        invoice_numbers.append(text)
+    return list(dict.fromkeys(invoice_numbers))
 
 
 def extract_task_id_from_path(path: str, *, base_path: str) -> str | None:

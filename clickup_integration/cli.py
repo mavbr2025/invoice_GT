@@ -4,8 +4,16 @@ import argparse
 import json
 import os
 
+import requests
+
 from business_central_client.client import BusinessCentralClient
 from business_central_client.config import Settings as BusinessCentralSettings
+from clickup_integration.ap_invoice_sync import (
+    APPurchaseInvoiceSettings,
+    apply_clickup_bc_purchase_invoice,
+    build_clickup_ap_transfer_comment,
+    prepare_clickup_bc_purchase_invoice_preview,
+)
 from clickup_integration.auth import (
     build_authorization_url,
     exchange_code_for_token,
@@ -184,6 +192,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--full-review",
         action="store_true",
         help="Run the weekly/full review window instead of the incremental window.",
+    )
+
+    ap_invoice_parser = subparsers.add_parser(
+        "sync-ap-invoice",
+        help="Preview or create a Guatemala ClickUp AP purchase invoice in Business Central",
+    )
+    ap_invoice_parser.add_argument("--task-id", required=True)
+    ap_invoice_parser.add_argument("--custom-task-ids", action="store_true")
+    ap_invoice_parser.add_argument("--team-id")
+    ap_invoice_parser.add_argument(
+        "--compare-bc-invoice-number",
+        help="Compare the proposed payload to an existing Business Central purchase invoice.",
+    )
+    ap_invoice_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Create the BC purchase invoice draft. Defaults to dry-run.",
     )
 
     whatsapp_route_parser = subparsers.add_parser(
@@ -565,6 +590,63 @@ def main() -> None:
         )
         return
 
+    if args.command == "sync-ap-invoice":
+        task = client.get_task(
+            args.task_id,
+            custom_task_ids=args.custom_task_ids,
+            team_id=args.team_id,
+            include_subtasks=False,
+        )
+        summary = summarize_task_for_customer_mapping(task)
+        bc_settings = BusinessCentralSettings.from_env()
+        bc_client = BusinessCentralClient(bc_settings)
+        ap_settings = APPurchaseInvoiceSettings.from_env()
+        pdf_contents = _download_task_pdf_attachments(client, task)
+
+        if args.apply:
+            result = apply_clickup_bc_purchase_invoice(
+                clickup_summary=summary,
+                bc_client=bc_client,
+                settings=ap_settings,
+                pdf_contents=pdf_contents,
+            )
+            if result.get("status") == "applied":
+                try:
+                    result = {
+                        **result,
+                        "clickup_comment": client.create_task_comment(
+                            summary["task_id"],
+                            comment_text=build_clickup_ap_transfer_comment(result),
+                            notify_all=False,
+                        ),
+                    }
+                except Exception as exc:
+                    result = {
+                        **result,
+                        "clickup_comment_warning": str(exc),
+                    }
+            _print(
+                {
+                    "mode": "applied",
+                    "result": result,
+                }
+            )
+            return
+
+        _print(
+            {
+                "mode": "dry_run",
+                "result": prepare_clickup_bc_purchase_invoice_preview(
+                    clickup_summary=summary,
+                    bc_client=bc_client,
+                    settings=ap_settings,
+                    pdf_contents=pdf_contents,
+                    compare_invoice_number=args.compare_bc_invoice_number,
+                ),
+            }
+        )
+        return
+
     if args.command == "resolve-whatsapp-route":
         whatsapp_settings = WhatsAppSettings.from_env()
         event = normalize_twilio_inbound(
@@ -615,6 +697,25 @@ def _with_updated_custom_field_value(
         else:
             updated_fields[field_name] = details
     return {**summary, "custom_fields": updated_fields}
+
+
+def _download_task_pdf_attachments(client: ClickUpClient, task: dict[str, object]) -> list[bytes]:
+    contents: list[bytes] = []
+    for attachment in task.get("attachments") or []:
+        if not isinstance(attachment, dict):
+            continue
+        name = str(attachment.get("title") or attachment.get("filename") or "").lower()
+        url = str(attachment.get("url") or "").strip()
+        if not url or not name.endswith(".pdf"):
+            continue
+        response = requests.get(
+            url,
+            headers=client._authorization_headers(),
+            timeout=120,
+        )
+        response.raise_for_status()
+        contents.append(response.content)
+    return contents
 
 
 if __name__ == "__main__":

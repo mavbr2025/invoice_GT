@@ -11,6 +11,8 @@ permissionset 71000 "MTM CUST INV API"
         tabledata "Report Selections" = R,
         tabledata "Sales Invoice Header" = R,
         tabledata "Sales Invoice Line" = RM,
+        tabledata "Sales Cr.Memo Header" = R,
+        tabledata "Sales Cr.Memo Line" = RM,
         codeunit GTMLeerDocumentos = X,
         codeunit "Fun. Factura GT" = X,
         codeunit "MTM GT Posted Inv FEL Mgt" = X,
@@ -19,6 +21,7 @@ permissionset 71000 "MTM CUST INV API"
         page "MTM Custom Report Sel API" = X,
         page "MTM Doc Sending Profiles API" = X,
         page "MTM Posted Inv FEL Desc API" = X,
+        page "MTM Posted Cr Memo FEL API" = X,
         page "MTM Report Layout List API" = X,
         page "MTM Report Layout Sel API" = X,
         page "MTM Report Selections API" = X;

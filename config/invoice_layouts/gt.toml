@@ -1,0 +1,70 @@
+[company]
+market = "GT"
+bc_company_name = "MTM_GT_PROD"
+display_name = "MTM LOGIX GUATEMALA, SOCIEDAD ANONIMA"
+issuer_nit = "109582985"
+
+[layout]
+name = "gt_invoice_standard_2026_05"
+bill_to_label = "FACTURAR A"
+customer_nit_label = "NIT:"
+issuer_nit_label = "NIT:"
+customer_nit_required = true
+customer_nit_label_required = true
+issuer_nit_required = true
+bank_footer_allowed = false
+
+required_text = [
+  "MTM LOGIX GUATEMALA",
+  "FACTURAR A",
+  "NIT: 109582985",
+]
+
+forbidden_text = [
+  "FACTRURA",
+  "Realizar pagos a la siguiente Cuenta",
+  "Banco:",
+  "Cuenta No.:",
+  "A nombre de:",
+]
+
+[overrides.customer_block]
+bill_to_label = "FACTURAR A"
+show_customer_nit = true
+customer_nit_format = "NIT: {customer_nit}"
+
+[overrides.payment_footer]
+show_bank_information = false
+
+[overrides.routing]
+manual_and_direct_send_must_match = true
+
+[customers.C00081]
+name = "COTTONTEXTILE, SOCIEDAD ANONIMA"
+nit = "108207552"
+
+[customers.C00093]
+name = "GRUPO MASTER DE GUATEMALA SOCIEDAD ANONIMA"
+nit = "575410"
+
+[customers.C00103]
+name = "REINVENTION REVOLUTION, LLC"
+nit = "3312801"
+
+[[samples]]
+source = "manual_pdf"
+invoice_number = "GTFVR0003684"
+path = "tmp/pdfs/GTFVR0003684 COTTONTEXTILE _7680 04052026.pdf"
+expected_status = "fails_until_bank_footer_removed_and_customer_nit_labeled"
+
+[[samples]]
+source = "manual_pdf"
+invoice_number = "GTFVR0003701"
+path = "tmp/pdfs/GTFVR0003701 COTTONTEXTILE _12190 05052026.pdf"
+expected_status = "fails_until_bank_footer_removed_and_customer_nit_labeled"
+
+[[samples]]
+source = "automated_email_pdf"
+invoice_number = "GTFVR0003715"
+path = "/Users/mario/Downloads/Invoice/Factura_GTFVR0003715.pdf"
+expected_status = "fails_until_issuer_and_customer_nits_are_labeled_and_factrura_is_corrected"

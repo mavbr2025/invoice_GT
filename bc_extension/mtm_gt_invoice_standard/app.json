@@ -1,0 +1,40 @@
+{
+  "id": "9f5afdd3-3d75-4660-91c1-91f205680a7d",
+  "name": "MTM GT Invoice Standard",
+  "publisher": "MTM Logix",
+  "version": "0.1.0.34",
+  "brief": "Canonical Guatemala invoice layout and routing.",
+  "description": "Adds the approved MTM Guatemala invoice layout to the existing FacturaGTM report and provides setup code to route print, PDF, and email invoice outputs to the same layout.",
+  "privacyStatement": "",
+  "EULA": "",
+  "help": "",
+  "url": "",
+  "logo": "",
+  "dependencies": [
+    {
+      "id": "3e27201c-94b4-431e-8a50-70527191b4c3",
+      "name": "MTM",
+      "publisher": "Mario Veraldo",
+      "version": "2.1.0.18"
+    }
+  ],
+  "screenshots": [],
+  "platform": "28.0.49812.0",
+  "application": "24.5.23489.23968",
+  "idRanges": [
+    {
+      "from": 71100,
+      "to": 71149
+    }
+  ],
+  "resourceExposurePolicy": {
+    "allowDebugging": true,
+    "allowDownloadingSource": true,
+    "includeSourceInSymbolFile": true
+  },
+  "runtime": "13.0",
+  "target": "Cloud",
+  "features": [
+    "NoImplicitWith"
+  ]
+}

@@ -269,6 +269,112 @@ class BusinessCentralClient:
 
         return self._request_bytes("GET", content_url, headers={"Accept": "application/pdf"})
 
+    def get_sales_credit_memos(
+        self,
+        *,
+        top: int | None = None,
+        filters: str | None = None,
+        company_id: str | None = None,
+        market: str | None = None,
+    ) -> list[dict[str, Any]]:
+        return self.get_entities(
+            "salesCreditMemos",
+            top=top,
+            filters=filters,
+            company_id=company_id,
+            market=market,
+        ).get("value", [])
+
+    def get_sales_credit_memo_by_number(
+        self,
+        credit_memo_number: str,
+        *,
+        company_id: str | None = None,
+        market: str | None = None,
+    ) -> dict[str, Any] | None:
+        escaped = credit_memo_number.replace("'", "''")
+        rows = self.find_entities(
+            "salesCreditMemos",
+            filters=f"number eq '{escaped}'",
+            top=2,
+            company_id=company_id,
+            market=market,
+        )
+        if not rows:
+            return None
+        if len(rows) > 1:
+            raise ValueError(f"More than one Business Central sales credit memo matched {credit_memo_number}.")
+        return rows[0]
+
+    def get_sales_credit_memo_by_external_document_number(
+        self,
+        external_document_number: str,
+        *,
+        company_id: str | None = None,
+        market: str | None = None,
+    ) -> dict[str, Any] | None:
+        escaped = external_document_number.replace("'", "''")
+        rows = self.find_entities(
+            "salesCreditMemos",
+            filters=f"externalDocumentNumber eq '{escaped}'",
+            top=2,
+            company_id=company_id,
+            market=market,
+        )
+        if not rows:
+            return None
+        if len(rows) > 1:
+            raise ValueError(
+                f"More than one Business Central sales credit memo matched external document {external_document_number}."
+            )
+        return rows[0]
+
+    def get_sales_credit_memo_lines(
+        self,
+        sales_credit_memo_id: str,
+        *,
+        company_id: str | None = None,
+        market: str | None = None,
+    ) -> list[dict[str, Any]]:
+        company = self._resolve_company_id(company_id=company_id, market=market)
+        if not company:
+            raise ValueError(
+                "A company ID is required. Set BC_COMPANY_ID, configure BC_MARKET_<CODE>_COMPANY_ID, "
+                "or pass company_id explicitly."
+            )
+        url = (
+            f"{self.settings.api_base_url}/companies({company})/"
+            f"salesCreditMemos({sales_credit_memo_id})/salesCreditMemoLines"
+        )
+        return self._request("GET", url).get("value", [])
+
+    def get_sales_credit_memo_pdf_content(
+        self,
+        sales_credit_memo_id: str,
+        *,
+        company_id: str | None = None,
+        market: str | None = None,
+    ) -> bytes:
+        company = self._resolve_company_id(company_id=company_id, market=market)
+        if not company:
+            raise ValueError(
+                "A company ID is required. Set BC_COMPANY_ID, configure BC_MARKET_<CODE>_COMPANY_ID, "
+                "or pass company_id explicitly."
+            )
+
+        url = (
+            f"{self.settings.api_base_url}/companies({company})/"
+            f"salesCreditMemos({sales_credit_memo_id})/pdfDocument"
+        )
+        pdf_document = self._request("GET", url)
+        content_url = _pdf_document_content_url(pdf_document)
+        if not content_url:
+            raise ValueError(
+                f"Business Central did not expose a PDF content link for credit memo {sales_credit_memo_id}."
+            )
+
+        return self._request_bytes("GET", content_url, headers={"Accept": "application/pdf"})
+
     def get_customer_by_id(
         self,
         customer_id: str,
@@ -555,6 +661,68 @@ class BusinessCentralClient:
             market=market,
         )
 
+    def create_purchase_invoice(
+        self,
+        payload: dict[str, Any],
+        *,
+        company_id: str | None = None,
+        market: str | None = None,
+    ) -> dict[str, Any]:
+        return self.post_to_company(
+            "/companies({company_id})/purchaseInvoices",
+            payload,
+            company_id=company_id,
+            market=market,
+        )
+
+    def create_purchase_invoice_line(
+        self,
+        purchase_invoice_id: str,
+        payload: dict[str, Any],
+        *,
+        company_id: str | None = None,
+        market: str | None = None,
+    ) -> dict[str, Any]:
+        return self.post_to_company(
+            f"/companies({{company_id}})/purchaseInvoices({purchase_invoice_id})/purchaseInvoiceLines",
+            payload,
+            company_id=company_id,
+            market=market,
+        )
+
+    def post_purchase_invoice(
+        self,
+        purchase_invoice_id: str,
+        *,
+        company_id: str | None = None,
+        market: str | None = None,
+    ) -> dict[str, Any]:
+        return self.post_to_company(
+            f"/companies({{company_id}})/purchaseInvoices({purchase_invoice_id})/Microsoft.NAV.post",
+            {},
+            company_id=company_id,
+            market=market,
+        )
+
+    def get_purchase_invoice_lines(
+        self,
+        purchase_invoice_id: str,
+        *,
+        company_id: str | None = None,
+        market: str | None = None,
+    ) -> list[dict[str, Any]]:
+        company = self._resolve_company_id(company_id=company_id, market=market)
+        if not company:
+            raise ValueError(
+                "A company ID is required. Set BC_COMPANY_ID, configure BC_MARKET_<CODE>_COMPANY_ID, "
+                "or pass company_id explicitly."
+            )
+        url = (
+            f"{self.settings.api_base_url}/companies({company})/"
+            f"purchaseInvoices({purchase_invoice_id})/purchaseInvoiceLines"
+        )
+        return self._request("GET", url).get("value", [])
+
     def post_sales_invoice(
         self,
         sales_invoice_id: str,
@@ -564,6 +732,63 @@ class BusinessCentralClient:
     ) -> dict[str, Any]:
         return self.post_to_company(
             f"/companies({{company_id}})/salesInvoices({sales_invoice_id})/Microsoft.NAV.post",
+            {},
+            company_id=company_id,
+            market=market,
+        )
+
+    def create_sales_credit_memo(
+        self,
+        payload: dict[str, Any],
+        *,
+        company_id: str | None = None,
+        market: str | None = None,
+    ) -> dict[str, Any]:
+        return self.post_to_company(
+            "/companies({company_id})/salesCreditMemos",
+            payload,
+            company_id=company_id,
+            market=market,
+        )
+
+    def create_sales_credit_memo_line(
+        self,
+        sales_credit_memo_id: str,
+        payload: dict[str, Any],
+        *,
+        company_id: str | None = None,
+        market: str | None = None,
+    ) -> dict[str, Any]:
+        return self.post_to_company(
+            f"/companies({{company_id}})/salesCreditMemos({sales_credit_memo_id})/salesCreditMemoLines",
+            payload,
+            company_id=company_id,
+            market=market,
+        )
+
+    def post_sales_credit_memo(
+        self,
+        sales_credit_memo_id: str,
+        *,
+        company_id: str | None = None,
+        market: str | None = None,
+    ) -> dict[str, Any]:
+        return self.post_to_company(
+            f"/companies({{company_id}})/salesCreditMemos({sales_credit_memo_id})/Microsoft.NAV.post",
+            {},
+            company_id=company_id,
+            market=market,
+        )
+
+    def cancel_sales_credit_memo(
+        self,
+        sales_credit_memo_id: str,
+        *,
+        company_id: str | None = None,
+        market: str | None = None,
+    ) -> dict[str, Any]:
+        return self.post_to_company(
+            f"/companies({{company_id}})/salesCreditMemos({sales_credit_memo_id})/Microsoft.NAV.cancel",
             {},
             company_id=company_id,
             market=market,
@@ -587,6 +812,26 @@ class BusinessCentralClient:
             return None
         if len(rows) > 1:
             raise ValueError(f"More than one posted invoice FEL row matched {invoice_number}.")
+        return rows[0]
+
+    def get_posted_credit_memo_fel_description_by_number(
+        self,
+        credit_memo_number: str,
+        *,
+        company_id: str | None = None,
+        market: str | None = None,
+    ) -> dict[str, Any] | None:
+        escaped = credit_memo_number.replace("'", "''")
+        rows = self._get_posted_credit_memo_fel_descriptions(
+            filters=f"number eq '{escaped}'",
+            top=2,
+            company_id=company_id,
+            market=market,
+        )
+        if not rows:
+            return None
+        if len(rows) > 1:
+            raise ValueError(f"More than one posted credit memo FEL row matched {credit_memo_number}.")
         return rows[0]
 
     def sync_posted_invoice_fel_line_descriptions(
@@ -613,6 +858,44 @@ class BusinessCentralClient:
         return self._post_posted_invoice_fel_action(
             posted_invoice_fel_row_id,
             "StampFelInvoice",
+            company_id=company_id,
+            market=market,
+        )
+
+    def stamp_posted_credit_memo_fel(
+        self,
+        posted_credit_memo_fel_row_id: str,
+        *,
+        company_id: str | None = None,
+        market: str | None = None,
+    ) -> dict[str, Any]:
+        return self._post_posted_credit_memo_fel_action(
+            posted_credit_memo_fel_row_id,
+            "StampFelCreditMemo",
+            company_id=company_id,
+            market=market,
+        )
+
+    def cancel_posted_credit_memo_fel_with_motive(
+        self,
+        posted_credit_memo_fel_row_id: str,
+        motive_text: str,
+        *,
+        issue_datetime_text: str | None = None,
+        company_id: str | None = None,
+        market: str | None = None,
+    ) -> dict[str, Any]:
+        body = {"motiveText": motive_text}
+        if issue_datetime_text:
+            body["issueDateTimeText"] = issue_datetime_text
+            action_name = "CancelFelCreditMemoWithMotiveAndIssueDateTime"
+        else:
+            action_name = "CancelFelCreditMemoWithMotive"
+
+        return self._post_posted_credit_memo_fel_action(
+            posted_credit_memo_fel_row_id,
+            action_name,
+            body=body,
             company_id=company_id,
             market=market,
         )
@@ -691,6 +974,30 @@ class BusinessCentralClient:
             params={"$top": top, "$filter": filters},
         ).get("value", [])
 
+    def _get_posted_credit_memo_fel_descriptions(
+        self,
+        *,
+        filters: str,
+        top: int = 1,
+        company_id: str | None = None,
+        market: str | None = None,
+    ) -> list[dict[str, Any]]:
+        company = self._resolve_company_id(company_id=company_id, market=market)
+        if not company:
+            raise ValueError(
+                "A company ID is required. Set BC_COMPANY_ID, configure BC_MARKET_<CODE>_COMPANY_ID, "
+                "or pass company_id explicitly."
+            )
+        url = (
+            f"https://api.businesscentral.dynamics.com/v2.0/{self.settings.environment}"
+            f"/api/mtmlogix/invoiceSync/v1.0/companies({company})/postedCreditMemoFelDescriptions"
+        )
+        return self._request(
+            "GET",
+            url,
+            params={"$top": top, "$filter": filters},
+        ).get("value", [])
+
     def _get_customer_invoicing_rows(
         self,
         *,
@@ -728,6 +1035,25 @@ class BusinessCentralClient:
             (
                 "/api/mtmlogix/invoiceSync/v1.0/companies({company_id})/"
                 f"postedInvoiceFelDescriptions({posted_invoice_fel_row_id})/Microsoft.NAV.{action_name}"
+            ),
+            body or {},
+            company_id=company_id,
+            market=market,
+        )
+
+    def _post_posted_credit_memo_fel_action(
+        self,
+        posted_credit_memo_fel_row_id: str,
+        action_name: str,
+        *,
+        body: dict[str, Any] | None = None,
+        company_id: str | None = None,
+        market: str | None = None,
+    ) -> dict[str, Any]:
+        return self.post_to_company(
+            (
+                "/api/mtmlogix/invoiceSync/v1.0/companies({company_id})/"
+                f"postedCreditMemoFelDescriptions({posted_credit_memo_fel_row_id})/Microsoft.NAV.{action_name}"
             ),
             body or {},
             company_id=company_id,

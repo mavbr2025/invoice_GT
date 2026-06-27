@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 import os
 import time
+import unicodedata
+from io import BytesIO
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any
@@ -15,6 +17,18 @@ from clickup_integration.invoice_sync import InvoiceAutomationSettings
 logger = logging.getLogger(__name__)
 
 DEFAULT_INVOICE_PDF_FIELD_ID = "5d67859a-1ae0-4cda-9f57-2a89bf1ff259"
+DEFAULT_REQUIRED_PDF_TEXT = (
+    "FACTURA ELECTRONICA",
+    "DOCUMENTO TRIBUTARIO ELECTRONICO",
+    "INFORMACION DE EMBARQUE",
+    "SERIE INTERNA",
+    "NO. INTERNO",
+)
+DEFAULT_FORBIDDEN_PDF_TEXT = (
+    "FACTRURA",
+    "SALDO PENDIENTE",
+    "REPORT.FEEL.COM.GT",
+)
 
 
 def resolve_invoice_pdf_field_id() -> str:
@@ -22,6 +36,11 @@ def resolve_invoice_pdf_field_id() -> str:
     if not pdf_field_id:
         raise ValueError("CLICKUP_INVOICE_PDF_FIELD_ID is required for invoice PDF upload.")
     return pdf_field_id
+
+
+def should_validate_invoice_pdf_layout() -> bool:
+    raw_value = os.getenv("CLICKUP_INVOICE_VALIDATE_PDF_LAYOUT", "true").strip().lower()
+    return raw_value not in {"0", "false", "no", "off"}
 
 
 def validate_invoice_pdf_field_on_task(
@@ -239,6 +258,11 @@ def _upload_invoice_pdfs_to_clickup_field(
             invoice_id=invoice_id,
             market=market,
         )
+        layout_validation = validate_invoice_pdf_layout(
+            pdf_content,
+            invoice_number=invoice_number,
+            invoice_group=invoice_group,
+        )
         temp_path = _write_temp_pdf(pdf_content)
         try:
             upload_result = clickup.upload_custom_field_attachment(
@@ -262,6 +286,8 @@ def _upload_invoice_pdfs_to_clickup_field(
                 "invoice_number": invoice_number,
                 "file_name": file_name,
                 "attachment_id": attachment_id,
+                "pdf_source": "business_central_salesInvoices_pdfDocument",
+                "layout_validation": layout_validation,
                 "upload_result": upload_result,
             }
         )
@@ -303,6 +329,73 @@ def _download_invoice_pdf_with_retry(
             )
             time.sleep(delay_seconds)
     raise RuntimeError(f"Could not download Business Central invoice PDF for {invoice_id}: {last_error}")
+
+
+def validate_invoice_pdf_layout(
+    pdf_content: bytes,
+    *,
+    invoice_number: str,
+    invoice_group: str,
+) -> dict[str, Any]:
+    if not should_validate_invoice_pdf_layout():
+        return {"status": "skipped", "reason": "CLICKUP_INVOICE_VALIDATE_PDF_LAYOUT disabled"}
+
+    text = _normalize_pdf_text(_extract_invoice_pdf_text(pdf_content))
+    required = _configured_pdf_text_markers(
+        "CLICKUP_INVOICE_PDF_REQUIRED_TEXT",
+        DEFAULT_REQUIRED_PDF_TEXT,
+    )
+    forbidden = _configured_pdf_text_markers(
+        "CLICKUP_INVOICE_PDF_FORBIDDEN_TEXT",
+        DEFAULT_FORBIDDEN_PDF_TEXT,
+    )
+    missing = [marker for marker in required if _normalize_pdf_text(marker) not in text]
+    present_forbidden = [marker for marker in forbidden if _normalize_pdf_text(marker) in text]
+
+    result = {
+        "status": "passed" if not missing and not present_forbidden else "failed",
+        "invoice_number": invoice_number,
+        "invoice_group": invoice_group,
+        "required_markers": required,
+        "missing_markers": missing,
+        "forbidden_markers": forbidden,
+        "present_forbidden_markers": present_forbidden,
+    }
+    if result["status"] == "failed":
+        raise ValueError(
+            "Business Central invoice PDF did not match the approved MTM GT invoice form "
+            f"for {invoice_number}. Missing markers: {missing or 'none'}. "
+            f"Forbidden markers: {present_forbidden or 'none'}."
+        )
+    return result
+
+
+def _extract_invoice_pdf_text(pdf_content: bytes) -> str:
+    try:
+        from pypdf import PdfReader
+    except ImportError as exc:  # pragma: no cover - production dependency guard
+        raise RuntimeError(
+            "pypdf is required to validate invoice PDFs before ClickUp/customer delivery."
+        ) from exc
+
+    try:
+        reader = PdfReader(BytesIO(pdf_content))
+        return "\n".join(page.extract_text() or "" for page in reader.pages)
+    except Exception as exc:  # pragma: no cover - corrupt PDF guard
+        raise ValueError("Could not extract text from Business Central invoice PDF.") from exc
+
+
+def _normalize_pdf_text(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", value or "")
+    without_accents = "".join(char for char in normalized if not unicodedata.combining(char))
+    return " ".join(without_accents.upper().split())
+
+
+def _configured_pdf_text_markers(env_name: str, default: tuple[str, ...]) -> list[str]:
+    raw_value = os.getenv(env_name, "").strip()
+    if not raw_value:
+        return list(default)
+    return [part.strip() for part in raw_value.split("|") if part.strip()]
 
 
 def _write_temp_pdf(content: bytes) -> Path:

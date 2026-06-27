@@ -3,8 +3,10 @@
 !.env.example
 
 .DS_Store
+**/.DS_Store
 
 __pycache__/
+**/__pycache__/
 .pytest_cache/
 *.pyc
 *.pyo
@@ -21,3 +23,16 @@ htmlcov/
 .idea/
 .vscode/
 .private/
+
+# Local/generated artifacts
+output/
+tmp/
+*.db
+*.sqlite
+*.sqlite3
+*.zip
+
+# Business Central build artifacts
+*.app
+.alpackages/
+**/.alpackages/

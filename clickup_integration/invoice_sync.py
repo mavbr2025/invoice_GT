@@ -4,6 +4,7 @@ import logging
 import os
 import json
 import time
+import unicodedata
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -64,6 +65,16 @@ class InvoiceAutomationSettings:
         "Container Numbers",
         "Containers",
         "Container",
+    )
+    product_field_names: tuple[str, ...] = ("Product/", "Product")
+    airway_bill_field_names: tuple[str, ...] = (
+        "Airway Bill",
+        "Airway Bill ",
+        "AWB",
+        "HAWB",
+        "MAWB",
+        "Agent's Reference",
+        "MTM Booking",
     )
 
     @classmethod
@@ -159,6 +170,22 @@ class InvoiceAutomationSettings:
             shipment_container_field_names=_env_csv(
                 "CLICKUP_INVOICE_SHIPMENT_CONTAINER_FIELD_NAMES",
                 default=("Container(s) number(s)/", "Container Numbers", "Containers", "Container"),
+            ),
+            product_field_names=_env_csv(
+                "CLICKUP_INVOICE_PRODUCT_FIELD_NAMES",
+                default=("Product/", "Product"),
+            ),
+            airway_bill_field_names=_env_csv(
+                "CLICKUP_INVOICE_AIRWAY_BILL_FIELD_NAMES",
+                default=(
+                    "Airway Bill",
+                    "Airway Bill ",
+                    "AWB",
+                    "HAWB",
+                    "MAWB",
+                    "Agent's Reference",
+                    "MTM Booking",
+                ),
             ),
             freight_account_number=os.getenv(
                 f"BC_MARKET_{supported_market}_FREIGHT_ACCOUNT_NUMBER",
@@ -448,6 +475,12 @@ def prepare_clickup_bc_sales_invoice_preview(
             "task_status": task_status,
         }
 
+    product_for_gate = _resolve_product_for_invoice_gate(custom_fields, config)
+    active_charges = [
+        _apply_product_charge_description_overrides(charge=charge, product=product_for_gate)
+        for charge in active_charges
+    ]
+
     line_payloads: list[dict[str, Any]] = []
     line_sources: list[dict[str, Any]] = []
     for charge in active_charges:
@@ -485,6 +518,7 @@ def prepare_clickup_bc_sales_invoice_preview(
                     "source_field_id": charge.get("source_field_id"),
                     "item_number": item.get("number") or item_number,
                     "description": charge["description"],
+                    "description_override": charge.get("description_override"),
                     "tax_group": charge.get("tax_group"),
                 }
             )
@@ -571,6 +605,26 @@ def prepare_clickup_bc_sales_invoice_preview(
             "proposed_bc_invoices": proposed_invoices,
         }
 
+    product_validation = _validate_product_invoice_gate(
+        product=product_for_gate,
+        line_sources=line_sources,
+        proposed_invoices=proposed_invoices,
+        shipment_metadata=shipment_metadata,
+    )
+    if product_validation["status"] != "passed":
+        return {
+            "status": "product_validation_failed",
+            "message": product_validation["message"],
+            "market": market,
+            "currency": currency,
+            "task_status": task_status,
+            "reference": reference,
+            "product_validation": product_validation,
+            "invoice_validation": invoice_validation,
+            "proposed_bc_invoices": proposed_invoices,
+            "line_sources": line_sources,
+        }
+
     duplicate_invoices: list[dict[str, Any]] = []
     for proposed_invoice in proposed_invoices:
         duplicate_check = _find_existing_invoice(
@@ -600,6 +654,9 @@ def prepare_clickup_bc_sales_invoice_preview(
             "existing_invoice": duplicate_invoices[0]["existing_invoice"],
             "duplicate_invoices": duplicate_invoices,
             "invoice_validation": invoice_validation,
+            "product_validation": product_validation,
+            "line_sources": line_sources,
+            "shipment_metadata": shipment_metadata,
             "proposed_bc_invoices": proposed_invoices,
         }
 
@@ -621,6 +678,7 @@ def prepare_clickup_bc_sales_invoice_preview(
         "proposed_bc_line_payloads": line_payloads,
         "line_sources": line_sources,
         "invoice_validation": invoice_validation,
+        "product_validation": product_validation,
         "proposed_bc_invoices": proposed_invoices,
     }
 
@@ -1151,10 +1209,150 @@ def _validate_proposed_invoice_totals(
                 "source_field_id": source.get("source_field_id"),
                 "item_number": source.get("item_number"),
                 "description": source.get("description"),
+                "description_override": source.get("description_override"),
             }
             for source in line_sources
         ],
     }
+
+
+def _apply_product_charge_description_overrides(
+    *,
+    charge: dict[str, Any],
+    product: dict[str, Any],
+) -> dict[str, Any]:
+    normalized_product = _normalize_text_for_invoice_gate(product.get("name") or "")
+    if not _is_air_product_name(normalized_product):
+        return charge
+
+    normalized_charge_name = _normalize_text_for_invoice_gate(charge.get("charge_name") or "")
+    normalized_source_field = _normalize_text_for_invoice_gate(charge.get("source_field") or "")
+    is_freight_charge = (
+        normalized_charge_name == "FREIGHT (OCEAN/TRUCK/AIR)"
+        or normalized_source_field == "FREIGHT (OCEAN/TRUCK/AIR)"
+    )
+    if not is_freight_charge:
+        return charge
+
+    return {
+        **charge,
+        "description": "COORDINACION VIRTUAL DE TRANSPORTE AEREO",
+        "description_override": {
+            "reason": "air_product_freight_description",
+            "original_description": charge.get("description"),
+        },
+    }
+
+
+def _validate_product_invoice_gate(
+    *,
+    product: dict[str, Any],
+    line_sources: list[dict[str, Any]],
+    proposed_invoices: list[dict[str, Any]],
+    shipment_metadata: dict[str, str],
+) -> dict[str, Any]:
+    normalized_product = _normalize_text_for_invoice_gate(product.get("name") or "")
+    if not _is_air_product_name(normalized_product):
+        return {
+            "status": "passed",
+            "product": product or None,
+            "warnings": [],
+        }
+
+    invalid_terms = ("MARITIMO", "MARITIME", "OCEAN", "FCL", "LCL", "CONTAINER", "CONTENEDOR")
+    failures: list[dict[str, Any]] = []
+    for source in line_sources:
+        description = str(source.get("description") or "")
+        normalized_description = _normalize_text_for_invoice_gate(description)
+        matched_terms = [term for term in invalid_terms if term in normalized_description]
+        if not matched_terms:
+            continue
+        failures.append(
+            {
+                "reason": "air_product_conflicts_with_invoice_description",
+                "matched_terms": matched_terms,
+                "charge_name": source.get("charge_name"),
+                "source_field": source.get("source_field"),
+                "source_field_id": source.get("source_field_id"),
+                "item_number": source.get("item_number"),
+                "description": description,
+                "amount": round(float(source.get("amount") or 0), 2),
+                "invoice_group": source.get("invoice_group"),
+            }
+        )
+
+    awb = _clean_marker_value(shipment_metadata.get("awb"))
+    if not awb:
+        failures.append(
+            {
+                "reason": "air_product_missing_awb",
+                "message": "Air shipment requires an AWB or air reference before invoice creation.",
+            }
+        )
+
+    warnings: list[dict[str, Any]] = []
+    containers = _clean_marker_value(shipment_metadata.get("containers"))
+    if containers and not awb:
+        warnings.append(
+            {
+                "reason": "air_product_uses_container_metadata_placeholder",
+                "message": (
+                    "Air shipment is using the container metadata value as the only available air "
+                    "reference. Populate AWB to avoid customer-facing ambiguity."
+                ),
+                "containers": containers,
+            }
+        )
+
+    result = {
+        "status": "failed" if failures else "passed",
+        "message": (
+            "Air shipment invoice lines contain ocean/maritime/container wording. "
+            "Update the product mapping or BC description before creating invoices."
+            if failures
+            else "Product invoice validation passed."
+        ),
+        "product": product,
+        "failures": failures,
+        "warnings": warnings,
+        "invoice_groups": [invoice.get("invoice_group") for invoice in proposed_invoices],
+    }
+    return result
+
+
+def _resolve_product_for_invoice_gate(
+    custom_fields: dict[str, dict[str, Any]],
+    config: InvoiceAutomationSettings,
+) -> dict[str, Any]:
+    for field_name in config.product_field_names:
+        field = custom_fields.get(field_name)
+        option = resolve_dropdown_field(field)
+        if option:
+            return {
+                "field_name": field_name,
+                "field_id": field.get("id") if field else None,
+                "name": option.get("name"),
+                "option_id": option.get("id"),
+            }
+        raw_value = field_value(custom_fields, field_name=field_name)
+        if raw_value:
+            return {
+                "field_name": field_name,
+                "field_id": field.get("id") if field else None,
+                "name": raw_value,
+                "option_id": None,
+            }
+    return {}
+
+
+def _is_air_product_name(normalized_product: str) -> bool:
+    return normalized_product in {"AIR", "AEREO"}
+
+
+def _normalize_text_for_invoice_gate(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", str(value or ""))
+    without_accents = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+    return " ".join(without_accents.upper().split())
 
 
 def _sum_source_amounts(line_sources: list[dict[str, Any]]) -> float:
@@ -1178,17 +1376,40 @@ def _resolve_shipment_metadata(
     custom_fields: dict[str, dict[str, Any]],
     config: InvoiceAutomationSettings,
 ) -> dict[str, str]:
+    product = _resolve_product_for_invoice_gate(custom_fields, config)
     return {
         "shipment_number": str(clickup_summary.get("name") or "").strip(),
         "booking": _first_present_field(custom_fields, config.shipment_booking_field_names),
         "containers": _first_present_field(custom_fields, config.shipment_container_field_names),
+        "product": str(product.get("name") or "").strip(),
+        "awb": _first_present_field(custom_fields, config.airway_bill_field_names),
     }
 
 
 def _build_shipment_metadata_lines(shipment_metadata: dict[str, str]) -> list[dict[str, Any]]:
     booking = _clean_marker_value(shipment_metadata.get("booking"))
     containers = _clean_marker_value(shipment_metadata.get("containers"))
+    product = _clean_marker_value(shipment_metadata.get("product"))
+    awb = _clean_marker_value(shipment_metadata.get("awb"))
     lines: list[dict[str, Any]] = []
+
+    if product:
+        lines.append(
+            {
+                "lineType": "Comment",
+                "description": _truncate_for_bc_description(f"MTM META PRODUCT {product}"),
+            }
+        )
+
+    if _is_air_product_name(_normalize_text_for_invoice_gate(product)):
+        if awb:
+            lines.append(
+                {
+                    "lineType": "Comment",
+                    "description": _truncate_for_bc_description(f"MTM META AWB {awb}"),
+                }
+            )
+        return lines
 
     if booking:
         lines.append(

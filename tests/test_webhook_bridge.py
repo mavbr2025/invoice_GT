@@ -1,3 +1,7 @@
+from io import BytesIO
+
+from reportlab.pdfgen import canvas
+
 from clickup_integration.config import ClickUpSettings
 from clickup_integration.invoice_sync import InvoiceAutomationSettings, InvoiceChargeMapping
 from webhook_bridge.main import (
@@ -7,6 +11,23 @@ from webhook_bridge.main import (
     extract_task_id,
     extract_task_id_from_path,
 )
+
+
+def _make_invoice_pdf_bytes() -> bytes:
+    output = BytesIO()
+    pdf = canvas.Canvas(output)
+    y = 780
+    for line in (
+        "FACTURA ELECTRONICA",
+        "DOCUMENTO TRIBUTARIO ELECTRONICO",
+        "INFORMACION DE EMBARQUE",
+        "SERIE INTERNA",
+        "NO. INTERNO",
+    ):
+        pdf.drawString(36, y, line)
+        y -= 14
+    pdf.save()
+    return output.getvalue()
 
 
 def test_customer_webhook_accepts_task_id_path_before_auth(monkeypatch) -> None:
@@ -396,7 +417,7 @@ class _FakeInvoiceBCClient:
         return {"No": invoice_number, "Estado_DTE": self.fel_rows.get(invoice_number, {}).get("electronicDocumentStatus")}
 
     def get_sales_invoice_pdf_content(self, sales_invoice_id: str, *, company_id=None, market=None):
-        return b"%PDF-1.4 fake invoice"
+        return _make_invoice_pdf_bytes()
 
     def get_company_metadata(self, *, company_id=None, market=None):
         return {"name": "MTM_GT_PROD"}

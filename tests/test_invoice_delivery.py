@@ -1,10 +1,26 @@
 from dataclasses import replace
+from io import BytesIO
 from types import SimpleNamespace
 
 import pytest
+from reportlab.pdfgen import canvas
 
-from clickup_integration.invoice_delivery import finalize_clickup_issued_invoices
+from clickup_integration.invoice_delivery import (
+    finalize_clickup_issued_invoices,
+    validate_invoice_pdf_layout,
+)
 from clickup_integration.invoice_sync import InvoiceAutomationSettings
+
+
+def make_pdf_bytes(*lines: str) -> bytes:
+    output = BytesIO()
+    pdf = canvas.Canvas(output)
+    y = 780
+    for line in lines:
+        pdf.drawString(36, y, line)
+        y -= 14
+    pdf.save()
+    return output.getvalue()
 
 
 class FakeClickUp:
@@ -52,7 +68,13 @@ class FakeClickUp:
 
 class FakeBC:
     def get_sales_invoice_pdf_content(self, sales_invoice_id, *, company_id=None, market=None):
-        return b"%PDF-1.4 invoice"
+        return make_pdf_bytes(
+            "FACTURA ELECTRONICA",
+            "DOCUMENTO TRIBUTARIO ELECTRONICO",
+            "INFORMACION DE EMBARQUE",
+            "SERIE INTERNA",
+            "NO. INTERNO",
+        )
 
     def get_company_metadata(self, *, company_id=None, market=None):
         return {"name": "MTM_GT_PROD"}
@@ -223,4 +245,19 @@ def test_finalize_clickup_issued_invoices_blocks_unstamped_finalized_result() ->
             settings=make_settings(),
             workspace_id="8451352",
             mark_status=True,
+        )
+
+
+def test_validate_invoice_pdf_layout_blocks_legacy_or_wrong_form_pdf() -> None:
+    legacy_pdf = make_pdf_bytes(
+        "FACTRURA",
+        "SALDO PENDIENTE",
+        "report.feel.com.gt",
+    )
+
+    with pytest.raises(ValueError, match="approved MTM GT invoice form"):
+        validate_invoice_pdf_layout(
+            legacy_pdf,
+            invoice_number="GTFVR0003945",
+            invoice_group="INT",
         )
