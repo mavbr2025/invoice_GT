@@ -409,15 +409,15 @@ def prepare_clickup_bc_sales_invoice_preview(
     eta_date = _resolve_eta_date(clickup_summary, config)
     invoice_date = _resolve_date_from_fields(custom_fields, config.invoice_date_field_names) or as_of
     posting_date = _resolve_date_from_fields(custom_fields, config.posting_date_field_names) or invoice_date
-    due_date = _resolve_date_from_fields(custom_fields, config.due_date_field_names) or eta_date
+    payment_terms_id = str((bc_customer or {}).get("paymentTermsId") or "").strip()
 
     missing_fields: list[str] = []
     if not customer_id and not customer_number:
         missing_fields.append("Business Central Customer ID or Business Central Customer Number")
     if not reference:
         missing_fields.append("Reference/custom_id/task_id")
-    if due_date is None:
-        missing_fields.append("Due Date or ETA")
+    if not payment_terms_id:
+        missing_fields.append("Business Central customer Payment Terms")
 
     if config.charge_mappings:
         charge_inputs = [
@@ -574,7 +574,7 @@ def prepare_clickup_bc_sales_invoice_preview(
         "customerPurchaseOrderReference": shipment_metadata["shipment_number"] or reference,
         "invoiceDate": invoice_date.isoformat(),
         "postingDate": posting_date.isoformat(),
-        "dueDate": due_date.isoformat(),
+        "paymentTermsId": payment_terms_id,
     }
     if customer_id:
         header_payload["customerId"] = customer_id

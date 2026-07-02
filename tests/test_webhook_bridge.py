@@ -324,6 +324,7 @@ class _FakeInvoiceBCClient:
                     "number": "C00067",
                     "displayName": "Customer",
                     "currencyCode": "USD",
+                    "paymentTermsId": "term-30-days",
                     "country": "GT",
                     "countryCode": None,
                 }
@@ -337,6 +338,7 @@ class _FakeInvoiceBCClient:
             "number": "C00067",
             "displayName": "Customer",
             "currencyCode": "USD",
+            "paymentTermsId": "term-30-days",
             "country": "GT",
             "countryCode": None,
         }
@@ -561,6 +563,8 @@ def test_invoice_webhook_dry_run_previews_bridge_without_mutation(monkeypatch) -
     assert payload["result"]["proposed_bc_line_payloads"][0]["lineObjectNumber"] == "INT000000026"
     assert payload["result"]["proposed_bc_invoices"][0]["proposed_bc_payload"]["externalDocumentNumber"] == "PO-1-INT"
     assert payload["result"]["proposed_bc_invoices"][1]["proposed_bc_payload"]["externalDocumentNumber"] == "PO-1-NAT"
+    assert payload["result"]["proposed_bc_invoices"][0]["proposed_bc_payload"]["paymentTermsId"] == "term-30-days"
+    assert "dueDate" not in payload["result"]["proposed_bc_invoices"][0]["proposed_bc_payload"]
     assert fake_clickup_clients[0].updated_tasks == []
     assert fake_clickup_clients[0].field_updates == []
     assert fake_bc_clients[0].created_headers == []
@@ -610,6 +614,8 @@ def test_invoice_webhook_apply_creates_invoice_and_writes_back(monkeypatch) -> N
     assert payload["result"]["status"] == "applied"
     assert fake_bc_clients[0].created_headers[0]["externalDocumentNumber"] == "PO-1-INT"
     assert fake_bc_clients[0].created_headers[1]["externalDocumentNumber"] == "PO-1-NAT"
+    assert fake_bc_clients[0].created_headers[0]["paymentTermsId"] == "term-30-days"
+    assert "dueDate" not in fake_bc_clients[0].created_headers[0]
     assert fake_bc_clients[0].created_lines[0]["lineObjectNumber"] == "INT000000026"
     assert fake_bc_clients[0].created_lines[1]["lineObjectNumber"] == "NAT00000028"
     assert fake_clickup_clients[0].custom_field_uploads == [

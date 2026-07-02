@@ -17,11 +17,13 @@ class FakeBCInvoiceClient:
         existing_invoices: list[dict] | None = None,
         customer_currency_code: str = "USD",
         customer_fel_country_code: str | None = "GT",
+        customer_payment_terms_id: str | None = "term-30-days",
     ) -> None:
         self.settings = SimpleNamespace()
         self.existing_invoices = existing_invoices or []
         self.customer_currency_code = customer_currency_code
         self.customer_fel_country_code = customer_fel_country_code
+        self.customer_payment_terms_id = customer_payment_terms_id
         self.created_headers: list[dict] = []
         self.created_lines: list[dict] = []
         self.customer_name_lookups: list[str] = []
@@ -35,6 +37,7 @@ class FakeBCInvoiceClient:
                     "number": "C00067",
                     "displayName": "Customer",
                     "currencyCode": self.customer_currency_code,
+                    "paymentTermsId": self.customer_payment_terms_id,
                     "country": "GT",
                     "countryCode": None,
                 }
@@ -65,6 +68,7 @@ class FakeBCInvoiceClient:
             "number": "C00067",
             "displayName": "Customer",
             "currencyCode": self.customer_currency_code,
+            "paymentTermsId": self.customer_payment_terms_id,
             "country": "GT",
             "countryCode": None,
         }
@@ -303,6 +307,18 @@ def test_prepare_clickup_bc_sales_invoice_preview_blocks_missing_gt_customer_fel
     assert "Pais" in result["message"]
 
 
+def test_prepare_clickup_bc_sales_invoice_preview_requires_bc_customer_payment_terms() -> None:
+    result = prepare_clickup_bc_sales_invoice_preview(
+        clickup_summary=make_clickup_summary(status="Listo para facturar"),
+        bc_client=FakeBCInvoiceClient(customer_payment_terms_id=None),
+        settings=make_settings(),
+        today=date(2026, 4, 8),
+    )
+
+    assert result["status"] == "missing_required_fields"
+    assert "Business Central customer Payment Terms" in result["missing_fields"]
+
+
 def test_prepare_clickup_bc_sales_invoice_preview_blocks_duplicates() -> None:
     result = prepare_clickup_bc_sales_invoice_preview(
         clickup_summary=make_clickup_summary(status="Listo para facturar"),
@@ -351,7 +367,8 @@ def test_apply_clickup_bc_sales_invoice_creates_header_and_lines() -> None:
     assert result["created_invoice"]["number"] == "SI-0001"
     assert bc_client.created_headers[0]["currencyCode"] == "USD"
     assert bc_client.created_headers[0]["externalDocumentNumber"] == "PO-7788"
-    assert bc_client.created_headers[0]["dueDate"] == "2026-04-15"
+    assert bc_client.created_headers[0]["paymentTermsId"] == "term-30-days"
+    assert "dueDate" not in bc_client.created_headers[0]
     assert len(bc_client.created_lines) == 2
     assert bc_client.created_lines[0]["lineObjectNumber"] == "4100"
     assert bc_client.created_lines[0]["unitPrice"] == 100.5
