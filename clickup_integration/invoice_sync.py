@@ -28,6 +28,7 @@ class InvoiceChargeMapping:
     bc_item_number: str
     bc_description: str
     tax_group: str | None = None
+    quantity_basis: str = "shipment"
 
 
 @dataclass(frozen=True)
@@ -65,6 +66,11 @@ class InvoiceAutomationSettings:
         "Container Numbers",
         "Containers",
         "Container",
+    )
+    shipment_container_count_field_names: tuple[str, ...] = (
+        "Number of Containers",
+        "Container Count",
+        "Containers Count",
     )
     product_field_names: tuple[str, ...] = ("Product/", "Product")
     airway_bill_field_names: tuple[str, ...] = (
@@ -170,6 +176,10 @@ class InvoiceAutomationSettings:
             shipment_container_field_names=_env_csv(
                 "CLICKUP_INVOICE_SHIPMENT_CONTAINER_FIELD_NAMES",
                 default=("Container(s) number(s)/", "Container Numbers", "Containers", "Container"),
+            ),
+            shipment_container_count_field_names=_env_csv(
+                "CLICKUP_INVOICE_SHIPMENT_CONTAINER_COUNT_FIELD_NAMES",
+                default=("Number of Containers", "Container Count", "Containers Count"),
             ),
             product_field_names=_env_csv(
                 "CLICKUP_INVOICE_PRODUCT_FIELD_NAMES",
@@ -498,22 +508,41 @@ def prepare_clickup_bc_sales_invoice_preview(
                     "task_status": task_status,
                 }
 
-            amount = float(charge["amount"])
+            amount = Decimal(str(charge["amount"]))
+            quantity_details = _resolve_invoice_line_quantity(
+                charge=charge,
+                amount=amount,
+                custom_fields=custom_fields,
+                config=config,
+                product=product_for_gate,
+            )
+            if quantity_details.get("error"):
+                return {
+                    "status": "invalid_line_quantity",
+                    "message": quantity_details["error"],
+                    "market": market,
+                    "currency": currency,
+                    "task_status": task_status,
+                    "charge_name": charge["charge_name"],
+                }
             line_payloads.append(
                 {
                     "lineType": "Item",
                     "lineObjectNumber": item.get("number") or item_number,
                     "itemId": item["id"],
                     "description": charge["description"],
-                    "quantity": 1,
-                    "unitPrice": amount,
+                    "quantity": quantity_details["quantity"],
+                    "unitPrice": quantity_details["unit_price"],
                 }
             )
             line_sources.append(
                 {
                     "charge_name": charge["charge_name"],
                     "invoice_group": _invoice_group_from_item_number(item.get("number") or item_number),
-                    "amount": amount,
+                    "amount": float(amount),
+                    "quantity": quantity_details["quantity"],
+                    "unit_price": quantity_details["unit_price"],
+                    "quantity_basis": quantity_details["quantity_basis"],
                     "source_field": charge["source_field"],
                     "source_field_id": charge.get("source_field_id"),
                     "item_number": item.get("number") or item_number,
@@ -546,22 +575,41 @@ def prepare_clickup_bc_sales_invoice_preview(
                 "task_status": task_status,
             }
 
-        amount = float(charge["amount"])
+        amount = Decimal(str(charge["amount"]))
+        quantity_details = _resolve_invoice_line_quantity(
+            charge=charge,
+            amount=amount,
+            custom_fields=custom_fields,
+            config=config,
+            product=product_for_gate,
+        )
+        if quantity_details.get("error"):
+            return {
+                "status": "invalid_line_quantity",
+                "message": quantity_details["error"],
+                "market": market,
+                "currency": currency,
+                "task_status": task_status,
+                "charge_name": charge["charge_name"],
+            }
         line_payloads.append(
             {
                 "lineType": "Account",
                 "lineObjectNumber": account.get("number") or account_number,
                 "accountId": account["id"],
                 "description": charge["description"],
-                "quantity": 1,
-                "unitPrice": amount,
+                "quantity": quantity_details["quantity"],
+                "unitPrice": quantity_details["unit_price"],
             }
         )
         line_sources.append(
             {
                 "charge_name": charge["charge_name"],
                 "invoice_group": "ACCOUNT",
-                "amount": amount,
+                "amount": float(amount),
+                "quantity": quantity_details["quantity"],
+                "unit_price": quantity_details["unit_price"],
+                "quantity_basis": quantity_details["quantity_basis"],
                 "source_field": charge["source_field"],
                 "account_number": account.get("number") or account_number,
                 "description": charge["description"],
@@ -1134,7 +1182,10 @@ def _invoice_group_sort_key(group: str) -> tuple[int, str]:
 
 
 def _sum_line_amounts(line_payloads: list[dict[str, Any]]) -> float:
-    return round(sum(float(line.get("unitPrice") or 0) for line in line_payloads), 2)
+    return round(
+        sum(float(line.get("unitPrice") or 0) * float(line.get("quantity") or 0) for line in line_payloads),
+        2,
+    )
 
 
 def _validate_proposed_invoice_totals(
@@ -1205,6 +1256,9 @@ def _validate_proposed_invoice_totals(
                 "charge_name": source.get("charge_name"),
                 "invoice_group": source.get("invoice_group"),
                 "amount": round(float(source.get("amount") or 0), 2),
+                "quantity": source.get("quantity"),
+                "unit_price": source.get("unit_price"),
+                "quantity_basis": source.get("quantity_basis"),
                 "source_field": source.get("source_field"),
                 "source_field_id": source.get("source_field_id"),
                 "item_number": source.get("item_number"),
@@ -1432,7 +1486,7 @@ def _build_shipment_metadata_lines(shipment_metadata: dict[str, str]) -> list[di
 
 def _chunk_container_metadata(containers: str) -> list[str]:
     max_chunk_len = 100 - len("MTM META CONTAINER ")
-    tokens = [token.strip() for token in containers.replace("\n", ",").split(",") if token.strip()]
+    tokens = _container_tokens(containers)
     if not tokens:
         return []
 
@@ -1457,6 +1511,97 @@ def _clean_marker_value(value: str | None) -> str:
 
 def _truncate_for_bc_description(value: str) -> str:
     return value[:100]
+
+
+def _resolve_invoice_line_quantity(
+    *,
+    charge: dict[str, Any],
+    amount: Decimal,
+    custom_fields: dict[str, dict[str, Any]],
+    config: InvoiceAutomationSettings,
+    product: dict[str, Any],
+) -> dict[str, Any]:
+    configured_basis = str(charge.get("quantity_basis") or "shipment").strip().lower() or "shipment"
+    if configured_basis == "container_count" and _is_air_product_name(
+        _normalize_text_for_invoice_gate(product.get("name") or "")
+    ):
+        basis = "shipment"
+    else:
+        basis = configured_basis
+
+    if basis in {"", "shipment"}:
+        return {
+            "quantity": 1,
+            "unit_price": float(amount),
+            "quantity_basis": "shipment",
+        }
+
+    if basis != "container_count":
+        return {
+            "error": (
+                f"Quantity basis {configured_basis!r} for {charge.get('charge_name') or 'charge'} "
+                "is not supported."
+            )
+        }
+
+    quantity = _resolve_container_count(custom_fields=custom_fields, config=config)
+    if quantity is None:
+        return {
+            "error": (
+                f"Charge {charge.get('charge_name') or 'charge'} is configured to bill by container count, "
+                "but Number of Containers is missing or invalid."
+            )
+        }
+
+    unit_price = amount / Decimal(quantity)
+    line_total = unit_price * Decimal(quantity)
+    if not _amounts_equal(float(amount), float(line_total)):
+        return {
+            "error": (
+                f"Charge {charge.get('charge_name') or 'charge'} amount {float(amount):.2f} cannot be "
+                f"validated against quantity {quantity} and unit price {float(unit_price):.5f}."
+            )
+        }
+
+    return {
+        "quantity": quantity,
+        "unit_price": float(unit_price),
+        "quantity_basis": "container_count",
+    }
+
+
+def _resolve_container_count(
+    *,
+    custom_fields: dict[str, dict[str, Any]],
+    config: InvoiceAutomationSettings,
+) -> int | None:
+    raw_count = _first_present_field(custom_fields, config.shipment_container_count_field_names)
+    count = _parse_positive_int(raw_count)
+    if count is not None:
+        return count
+
+    containers = _first_present_field(custom_fields, config.shipment_container_field_names)
+    tokens = _container_tokens(containers)
+    if tokens:
+        return len(tokens)
+
+    return None
+
+
+def _parse_positive_int(value: Any) -> int | None:
+    if value in {None, ""}:
+        return None
+    parsed = _parse_decimal(value)
+    if parsed is None:
+        return None
+    if parsed <= 0 or parsed != parsed.to_integral_value():
+        return None
+    return int(parsed)
+
+
+def _container_tokens(value: Any) -> list[str]:
+    normalized = str(value or "").replace("\n", ",").replace(";", ",")
+    return [token.strip() for token in normalized.split(",") if token.strip()]
 
 
 def _combined_created_invoice_for_writeback(created_invoices: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1530,6 +1675,7 @@ def _build_mapped_charge_input(
             "source_field": source_field,
             "source_field_id": source_field_id,
             "tax_group": mapping.tax_group,
+            "quantity_basis": mapping.quantity_basis,
         }
 
     amount = _parse_decimal(raw_value)
@@ -1545,6 +1691,7 @@ def _build_mapped_charge_input(
                 "source_field": source_field,
                 "source_field_id": source_field_id,
                 "tax_group": mapping.tax_group,
+                "quantity_basis": mapping.quantity_basis,
                 "error": f"Charge field {source_field or mapping.charge_name} has an invalid numeric value.",
             }
 
@@ -1556,6 +1703,7 @@ def _build_mapped_charge_input(
         "source_field": source_field,
         "source_field_id": source_field_id,
         "tax_group": mapping.tax_group,
+        "quantity_basis": mapping.quantity_basis,
     }
 
 
@@ -2133,6 +2281,11 @@ def load_invoice_charge_mappings(path: str | os.PathLike[str]) -> tuple[InvoiceC
         bc_item_number = str(row.get("bc_item_number") or "").strip()
         bc_description = str(row.get("bc_description") or charge_name).strip()
         tax_group = str(row.get("tax_group") or "").strip() or None
+        quantity_basis = str(row.get("quantity_basis") or "shipment").strip().lower() or "shipment"
+        if quantity_basis not in {"shipment", "container_count"}:
+            raise ValueError(
+                f"Invoice charge mapping row {index} has unsupported quantity_basis: {quantity_basis}"
+            )
         missing = [
             name
             for name, value in (
@@ -2157,6 +2310,7 @@ def load_invoice_charge_mappings(path: str | os.PathLike[str]) -> tuple[InvoiceC
                 bc_item_number=bc_item_number,
                 bc_description=bc_description,
                 tax_group=tax_group,
+                quantity_basis=quantity_basis,
             )
         )
 

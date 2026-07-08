@@ -441,6 +441,79 @@ def test_prepare_clickup_bc_sales_invoice_preview_uses_charge_mapping_items() ->
     assert result["line_sources"][0]["source_field_id"] == "field-freight"
 
 
+def test_prepare_clickup_bc_sales_invoice_preview_uses_container_count_quantities() -> None:
+    settings = InvoiceAutomationSettings(
+        **{
+            **make_settings().__dict__,
+            "charge_mappings": (
+                InvoiceChargeMapping(
+                    charge_name="Freight (Ocean/Truck/Air)",
+                    clickup_field_name="Freight (Ocean/Truck/Air)",
+                    clickup_field_id="field-freight",
+                    bc_item_number="INT000000026",
+                    bc_description="COORDINACION VIRTUAL DE TRANSPORTE MARITIMO",
+                    tax_group="NO IVA",
+                    quantity_basis="container_count",
+                ),
+                InvoiceChargeMapping(
+                    charge_name="Emergency Surcharge",
+                    clickup_field_name="Emergency Surcharge",
+                    clickup_field_id="field-emergency",
+                    bc_item_number="INT000000032",
+                    bc_description="EMERGENCY SURCHARGE",
+                    tax_group="NO IVA",
+                    quantity_basis="container_count",
+                ),
+            ),
+        }
+    )
+    summary = make_clickup_summary(status="Listo para facturar")
+    summary["custom_fields"]["Freight (Ocean/Truck/Air)"] = {
+        "id": "field-freight",
+        "value": "5600.00",
+    }
+    summary["custom_fields"]["Emergency Surcharge"] = {
+        "id": "field-emergency",
+        "value": "320.00",
+    }
+    summary["custom_fields"]["Number of Containers"] = {"value": "2"}
+    summary["custom_fields"]["Container(s) number(s)/"] = {"value": "ONEU5006184, BSIU8104502"}
+
+    result = prepare_clickup_bc_sales_invoice_preview(
+        clickup_summary=summary,
+        bc_client=FakeBCInvoiceClient(),
+        settings=settings,
+        today=date(2026, 4, 8),
+    )
+
+    assert result["status"] == "dry_run_ready"
+    assert result["proposed_bc_line_payloads"] == [
+        {
+            "lineType": "Item",
+            "lineObjectNumber": "INT000000026",
+            "itemId": "item-INT000000026",
+            "description": "COORDINACION VIRTUAL DE TRANSPORTE MARITIMO",
+            "quantity": 2,
+            "unitPrice": 2800.0,
+        },
+        {
+            "lineType": "Item",
+            "lineObjectNumber": "INT000000032",
+            "itemId": "item-INT000000032",
+            "description": "EMERGENCY SURCHARGE",
+            "quantity": 2,
+            "unitPrice": 160.0,
+        },
+    ]
+    assert result["proposed_bc_invoices"][0]["total"] == 5920.0
+    assert result["invoice_validation"]["line_payload_total"] == 5920.0
+    assert result["invoice_validation"]["expected_total"] == 5920.0
+    assert [field["quantity_basis"] for field in result["invoice_validation"]["billable_fields"]] == [
+        "container_count",
+        "container_count",
+    ]
+
+
 def test_prepare_clickup_bc_sales_invoice_preview_rewrites_air_freight_description() -> None:
     settings = InvoiceAutomationSettings(
         **{
