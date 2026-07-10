@@ -616,10 +616,13 @@ def prepare_clickup_bc_sales_invoice_preview(
             }
         )
 
+    customer_purchase_order_reference, header_warnings = _bounded_customer_purchase_order_reference(
+        shipment_metadata["shipment_number"] or reference
+    )
     header_payload = {
         "currencyCode": currency,
         "externalDocumentNumber": reference,
-        "customerPurchaseOrderReference": shipment_metadata["shipment_number"] or reference,
+        "customerPurchaseOrderReference": customer_purchase_order_reference,
         "invoiceDate": invoice_date.isoformat(),
         "postingDate": posting_date.isoformat(),
         "paymentTermsId": payment_terms_id,
@@ -705,6 +708,7 @@ def prepare_clickup_bc_sales_invoice_preview(
             "product_validation": product_validation,
             "line_sources": line_sources,
             "shipment_metadata": shipment_metadata,
+            "header_warnings": header_warnings,
             "proposed_bc_invoices": proposed_invoices,
         }
 
@@ -721,6 +725,7 @@ def prepare_clickup_bc_sales_invoice_preview(
         "customer_number": customer_number or None,
         "customer_resolution": customer_resolution,
         "shipment_metadata": shipment_metadata,
+        "header_warnings": header_warnings,
         "eta_date": eta_date.isoformat() if eta_date else None,
         "proposed_bc_payload": proposed_invoices[0]["proposed_bc_payload"],
         "proposed_bc_line_payloads": line_payloads,
@@ -1511,6 +1516,28 @@ def _clean_marker_value(value: str | None) -> str:
 
 def _truncate_for_bc_description(value: str) -> str:
     return value[:100]
+
+
+def _bounded_customer_purchase_order_reference(value: str, *, maximum_length: int = 35) -> tuple[str, list[str]]:
+    """Fit the BC purchase-order header without changing the printed shipment reference."""
+    normalized = _clean_marker_value(value)
+    if len(normalized) <= maximum_length:
+        return normalized, []
+
+    bounded = normalized[:maximum_length]
+    word_boundary = bounded.rfind(" ")
+    if word_boundary > 0:
+        bounded = bounded[:word_boundary].rstrip(" ,-/(")
+    if not bounded:
+        bounded = normalized[:maximum_length]
+
+    return (
+        bounded,
+        [
+            "Business Central Customer Purchase Order Reference was shortened to "
+            f"{maximum_length} characters: {bounded}"
+        ],
+    )
 
 
 def _resolve_invoice_line_quantity(

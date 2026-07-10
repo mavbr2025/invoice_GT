@@ -803,6 +803,47 @@ def test_prepare_clickup_bc_sales_invoice_preview_adds_shipment_metadata_for_tem
     }
 
 
+def test_prepare_clickup_bc_sales_invoice_preview_bounds_long_bc_purchase_order_reference() -> None:
+    settings = InvoiceAutomationSettings(
+        **{
+            **make_settings().__dict__,
+            "charge_mappings": (
+                InvoiceChargeMapping(
+                    charge_name="Freight (Ocean/Truck/Air)",
+                    clickup_field_name="Freight (Ocean/Truck/Air)",
+                    clickup_field_id="field-freight",
+                    bc_item_number="INT000000026",
+                    bc_description="COORDINACION VIRTUAL DE TRANSPORTE MARITIMO",
+                    tax_group="NO IVA",
+                ),
+            ),
+        }
+    )
+    summary = make_clickup_summary(status="Listo para facturar")
+    summary["name"] = "PO 260514S - (M26-164, M26-183) (1x40+20)"
+    summary["custom_fields"]["Freight (Ocean/Truck/Air)"] = {
+        "id": "field-freight",
+        "value": "100.50",
+    }
+
+    result = prepare_clickup_bc_sales_invoice_preview(
+        clickup_summary=summary,
+        bc_client=FakeBCInvoiceClient(),
+        settings=settings,
+        today=date(2026, 4, 8),
+    )
+
+    assert result["status"] == "dry_run_ready"
+    assert result["shipment_metadata"]["shipment_number"] == summary["name"]
+    assert result["proposed_bc_payload"]["customerPurchaseOrderReference"] == (
+        "PO 260514S - (M26-164, M26-183)"
+    )
+    assert result["header_warnings"] == [
+        "Business Central Customer Purchase Order Reference was shortened to 35 characters: "
+        "PO 260514S - (M26-164, M26-183)"
+    ]
+
+
 def test_prepare_clickup_bc_sales_invoice_preview_chunks_shipment_containers() -> None:
     settings = InvoiceAutomationSettings.from_env()
     summary = make_clickup_summary(status="Listo para facturar")
