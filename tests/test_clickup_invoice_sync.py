@@ -5,6 +5,7 @@ from clickup_integration.invoice_sync import (
     InvoiceChargeMapping,
     InvoiceAutomationSettings,
     apply_clickup_bc_sales_invoice,
+    issue_clickup_bc_sales_invoice,
     prepare_clickup_bc_sales_invoice_preview,
     prepare_clickup_invoice_status_transition,
 )
@@ -97,6 +98,157 @@ class FakeBCInvoiceClient:
         return {"id": f"line-{len(self.created_lines)}", **payload}
 
 
+class FakeMXBCInvoiceClient:
+    def __init__(self, *, payment_terms_code: str = "PPD", payment_method_code: str = "99") -> None:
+        self.settings = SimpleNamespace()
+        self.payment_terms_code = payment_terms_code
+        self.payment_method_code = payment_method_code
+        self.created_headers: list[dict] = []
+        self.created_lines: list[dict] = []
+        self.payment_field_updates: list[dict] = []
+        self.draft_invoices: dict[str, dict] = {}
+        self.posted_invoices: dict[str, dict] = {}
+        self.cfdi_rows: dict[str, dict] = {}
+        self.sync_fel_calls: list[str] = []
+        self.gt_stamp_calls: list[str] = []
+        self.mx_stamp_calls: list[str] = []
+
+    def find_entities(self, entity_name: str, *, filters: str, top: int = 1, company_id=None, market=None):
+        assert market == "MX"
+        if entity_name == "customers":
+            return [
+                {
+                    "id": "mx-customer-id-1",
+                    "number": "C00099",
+                    "displayName": "COMPAÑIA MINERA AUTLAN",
+                    "currencyCode": "USD",
+                    "paymentTermsId": "mx-term-ppd",
+                    "country": "MX",
+                    "countryCode": "MX",
+                }
+            ]
+        assert entity_name == "salesInvoices"
+        return []
+
+    def resolve_account_by_number(self, account_number: str, *, market: str | None = None):
+        assert market == "MX"
+        return {"id": f"mx-acc-{account_number}", "number": account_number}
+
+    def resolve_item_by_number(self, item_number: str, *, market: str | None = None):
+        assert market == "MX"
+        return {"id": f"mx-item-{item_number}", "number": item_number}
+
+    def get_customer_by_id(self, customer_id: str, *, market: str | None = None):
+        assert market == "MX"
+        return {
+            "id": customer_id,
+            "number": "C00099",
+            "displayName": "COMPAÑIA MINERA AUTLAN",
+            "currencyCode": "USD",
+            "paymentTermsId": "mx-term-ppd",
+            "country": "MX",
+            "countryCode": "MX",
+        }
+
+    def get_customer_invoicing_by_number(self, customer_number: str, *, company_id=None, market=None):
+        assert market == "MX"
+        assert customer_number == "C00099"
+        return {
+            "id": "mx-customer-id-1",
+            "number": "C00099",
+            "paymentTermsCode": self.payment_terms_code,
+            "paymentMethodCode": self.payment_method_code,
+        }
+
+    def create_sales_invoice(self, payload: dict, *, company_id=None, market=None):
+        assert market == "MX"
+        self.created_headers.append(payload)
+        invoice = {"id": f"mx-draft-{len(self.created_headers)}", "number": "FV00015", **payload}
+        self.draft_invoices[invoice["id"]] = invoice
+        return invoice
+
+    def set_mx_payment_fields(
+        self,
+        sales_invoice_id: str,
+        *,
+        payment_terms_code: str,
+        payment_method_code: str,
+        company_id=None,
+        market=None,
+    ):
+        assert market == "MX"
+        update = {
+            "sales_invoice_id": sales_invoice_id,
+            "payment_terms_code": payment_terms_code,
+            "payment_method_code": payment_method_code,
+        }
+        self.payment_field_updates.append(update)
+        return {"status": "updated", **update}
+
+    def create_sales_invoice_line(self, sales_invoice_id: str, payload: dict, *, company_id=None, market=None):
+        assert market == "MX"
+        self.created_lines.append(payload)
+        return {"id": f"mx-line-{len(self.created_lines)}", **payload}
+
+    def post_sales_invoice(self, sales_invoice_id: str, *, company_id=None, market=None):
+        assert market == "MX"
+        draft = self.draft_invoices[sales_invoice_id]
+        posted = {
+            **draft,
+            "id": sales_invoice_id,
+            "number": f"B000334{len(self.posted_invoices) + 2}",
+        }
+        self.posted_invoices[sales_invoice_id] = posted
+        self.cfdi_rows[posted["number"]] = {
+            "id": f"mx-cfdi-row-{len(self.cfdi_rows) + 1}",
+            "number": posted["number"],
+            "electronicDocumentStatus": "Stamp Pending",
+            "fiscalInvoiceNumberPac": "",
+            "errorDescription": "",
+        }
+        return {"status": "posted", "id": sales_invoice_id, "number": posted["number"]}
+
+    def get_entity(self, entity_name: str, entity_id: str, *, company_id=None, market=None):
+        assert market == "MX"
+        assert entity_name == "salesInvoices"
+        return self.posted_invoices.get(entity_id) or self.draft_invoices.get(entity_id)
+
+    def get_posted_sales_invoice_by_external_document_number(
+        self,
+        external_document_number: str,
+        *,
+        company_id=None,
+        market=None,
+    ):
+        assert market == "MX"
+        for invoice in self.posted_invoices.values():
+            if invoice.get("externalDocumentNumber") == external_document_number:
+                return invoice
+        return None
+
+    def get_posted_invoice_fel_description_by_number(self, invoice_number: str, *, company_id=None, market=None):
+        assert market == "MX"
+        return self.cfdi_rows.get(invoice_number)
+
+    def sync_posted_invoice_fel_line_descriptions(self, posted_invoice_fel_row_id: str, *, company_id=None, market=None):
+        self.sync_fel_calls.append(posted_invoice_fel_row_id)
+        raise AssertionError("Mexico issuance must not call GT FEL line-description sync")
+
+    def stamp_posted_invoice_fel(self, posted_invoice_fel_row_id: str, *, company_id=None, market=None):
+        self.gt_stamp_calls.append(posted_invoice_fel_row_id)
+        raise AssertionError("Mexico issuance must not call GT FEL stamping")
+
+    def stamp_mx_invoice(self, posted_invoice_fel_row_id: str, *, company_id=None, market=None):
+        assert market == "MX"
+        self.mx_stamp_calls.append(posted_invoice_fel_row_id)
+        for row in self.cfdi_rows.values():
+            if row["id"] == posted_invoice_fel_row_id:
+                row["electronicDocumentStatus"] = "Stamp Received"
+                row["fiscalInvoiceNumberPac"] = "E9AC7F0C-8F08-4DAC-BB73-22B8F6F1CB83"
+                return {"status": "stamp_requested", "id": posted_invoice_fel_row_id}
+        raise ValueError(f"Unknown MX CFDI row {posted_invoice_fel_row_id}")
+
+
 def make_settings() -> InvoiceAutomationSettings:
     return InvoiceAutomationSettings(
         ready_status="Listo para facturar",
@@ -144,6 +296,40 @@ def make_clickup_summary(*, status: str) -> dict:
             "Destination Charges": {"value": "45.00"},
         },
     }
+
+
+def make_mx_settings() -> InvoiceAutomationSettings:
+    return InvoiceAutomationSettings(
+        **{
+            **make_settings().__dict__,
+            "supported_market": "MX",
+            "charge_mappings": (
+                InvoiceChargeMapping(
+                    charge_name="Freight (Ocean/Truck/Air)",
+                    clickup_field_name="Freight (Ocean/Truck/Air)",
+                    clickup_field_id="field-mx-freight",
+                    bc_item_number="INT000000026",
+                    bc_description="COORDINACION VIRTUAL DE TRANSPORTE MARITIMO",
+                    tax_group="IVA 0",
+                ),
+            ),
+        }
+    )
+
+
+def make_mx_clickup_summary(*, status: str) -> dict:
+    summary = make_clickup_summary(status=status)
+    summary["market"] = "MX"
+    summary["custom_id"] = "SHP-30095"
+    summary["name"] = "UW-26-ES-001"
+    summary["custom_fields"]["Business Central Customer ID"] = {"value": "mx-customer-id-1"}
+    summary["custom_fields"]["Business Central Customer Number"] = {"value": "C00099"}
+    summary["custom_fields"].pop("Reference", None)
+    summary["custom_fields"]["Freight (Ocean/Truck/Air)"] = {
+        "id": "field-mx-freight",
+        "value": "2100.00",
+    }
+    return summary
 
 
 def test_prepare_clickup_invoice_status_transition_ready() -> None:
@@ -319,6 +505,38 @@ def test_prepare_clickup_bc_sales_invoice_preview_requires_bc_customer_payment_t
     assert "Business Central customer Payment Terms" in result["missing_fields"]
 
 
+def test_prepare_mx_invoice_preview_requires_customer_payment_terms_and_method_codes() -> None:
+    result = prepare_clickup_bc_sales_invoice_preview(
+        clickup_summary=make_mx_clickup_summary(status="Listo para facturar"),
+        bc_client=FakeMXBCInvoiceClient(payment_terms_code="", payment_method_code=""),
+        settings=make_mx_settings(),
+        today=date(2026, 4, 8),
+    )
+
+    assert result["status"] == "market_invoice_readiness_failed"
+    assert result["market_invoice_settings"]["status"] == "missing_mx_payment_fields"
+    assert result["market_invoice_settings"]["missing_fields"] == [
+        "Business Central customer Payment Terms Code",
+        "Business Central customer Payment Method Code",
+    ]
+
+
+def test_prepare_mx_invoice_preview_marks_payment_complement_as_future_architecture() -> None:
+    result = prepare_clickup_bc_sales_invoice_preview(
+        clickup_summary=make_mx_clickup_summary(status="Listo para facturar"),
+        bc_client=FakeMXBCInvoiceClient(),
+        settings=make_mx_settings(),
+        today=date(2026, 4, 8),
+    )
+
+    assert result["status"] == "dry_run_ready"
+    assert result["market"] == "MX"
+    assert result["reference"] == "UW-26-ES-001"
+    assert result["market_invoice_settings"]["paymentTermsCode"] == "PPD"
+    assert result["market_invoice_settings"]["paymentMethodCode"] == "99"
+    assert result["market_invoice_settings"]["paymentComplement"]["status"] == "pending_future_architecture"
+
+
 def test_prepare_clickup_bc_sales_invoice_preview_blocks_duplicates() -> None:
     result = prepare_clickup_bc_sales_invoice_preview(
         clickup_summary=make_clickup_summary(status="Listo para facturar"),
@@ -378,6 +596,43 @@ def test_apply_clickup_bc_sales_invoice_creates_header_and_lines() -> None:
     assert result["invoice_writeback"]["bc_invoice_id"] == "invoice-id-1"
     assert result["invoice_writeback"]["field_ids"]["invoice_number"] == "field-invoice-number"
     assert result["invoice_writeback"]["field_ids"]["invoice_id"] == "field-invoice-id"
+
+
+def test_issue_mx_invoice_sets_payment_fields_and_uses_mx_cfdi_stamp_only() -> None:
+    bc_client = FakeMXBCInvoiceClient()
+
+    result = issue_clickup_bc_sales_invoice(
+        clickup_summary=make_mx_clickup_summary(status="Listo para facturar"),
+        bc_client=bc_client,
+        settings=make_mx_settings(),
+        today=date(2026, 4, 8),
+    )
+
+    assert result["status"] == "applied"
+    assert result["market"] == "MX"
+    assert result["completed_stages"] == [
+        "create_sales_invoice",
+        "post_sales_invoice",
+        "stamp_mx_invoice",
+    ]
+    assert bc_client.payment_field_updates == [
+        {
+            "sales_invoice_id": "mx-draft-1",
+            "payment_terms_code": "PPD",
+            "payment_method_code": "99",
+        }
+    ]
+    assert bc_client.sync_fel_calls == []
+    assert bc_client.gt_stamp_calls == []
+    assert bc_client.mx_stamp_calls == ["mx-cfdi-row-1"]
+    assert result["finalized_invoices"][0]["posted_invoice_after_stamp"]["number"] == "B0003342"
+    assert result["finalized_invoices"][0]["custom_api_row_after_stamp"]["electronicDocumentStatus"] == (
+        "Stamp Received"
+    )
+    assert result["finalized_invoices"][0]["custom_api_row_after_stamp"]["fiscalInvoiceNumberPac"] == (
+        "E9AC7F0C-8F08-4DAC-BB73-22B8F6F1CB83"
+    )
+    assert result["finalized_invoices"][0]["gt_registered_invoice_after_stamp"] is None
 
 
 def test_prepare_clickup_bc_sales_invoice_preview_uses_charge_mapping_items() -> None:

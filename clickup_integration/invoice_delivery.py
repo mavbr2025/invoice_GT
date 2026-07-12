@@ -29,6 +29,12 @@ DEFAULT_FORBIDDEN_PDF_TEXT = (
     "SALDO PENDIENTE",
     "REPORT.FEEL.COM.GT",
 )
+DEFAULT_MX_REQUIRED_PDF_TEXT = (
+    "CFDI",
+    "Folio Fiscal",
+    "Sello Digital",
+    "Este documento es una representación impresa de un CFDI",
+)
 
 
 def resolve_invoice_pdf_field_id() -> str:
@@ -262,6 +268,7 @@ def _upload_invoice_pdfs_to_clickup_field(
             pdf_content,
             invoice_number=invoice_number,
             invoice_group=invoice_group,
+            market=market,
         )
         temp_path = _write_temp_pdf(pdf_content)
         try:
@@ -336,18 +343,20 @@ def validate_invoice_pdf_layout(
     *,
     invoice_number: str,
     invoice_group: str,
+    market: str | None = None,
 ) -> dict[str, Any]:
     if not should_validate_invoice_pdf_layout():
         return {"status": "skipped", "reason": "CLICKUP_INVOICE_VALIDATE_PDF_LAYOUT disabled"}
 
+    normalized_market = str(market or "").strip().upper()
     text = _normalize_pdf_text(_extract_invoice_pdf_text(pdf_content))
     required = _configured_pdf_text_markers(
-        "CLICKUP_INVOICE_PDF_REQUIRED_TEXT",
-        DEFAULT_REQUIRED_PDF_TEXT,
+        _market_pdf_env_name("CLICKUP_INVOICE_PDF_REQUIRED_TEXT", normalized_market),
+        _default_required_pdf_text(normalized_market),
     )
     forbidden = _configured_pdf_text_markers(
-        "CLICKUP_INVOICE_PDF_FORBIDDEN_TEXT",
-        DEFAULT_FORBIDDEN_PDF_TEXT,
+        _market_pdf_env_name("CLICKUP_INVOICE_PDF_FORBIDDEN_TEXT", normalized_market),
+        _default_forbidden_pdf_text(normalized_market),
     )
     missing = [marker for marker in required if _normalize_pdf_text(marker) not in text]
     present_forbidden = [marker for marker in forbidden if _normalize_pdf_text(marker) in text]
@@ -356,14 +365,16 @@ def validate_invoice_pdf_layout(
         "status": "passed" if not missing and not present_forbidden else "failed",
         "invoice_number": invoice_number,
         "invoice_group": invoice_group,
+        "market": normalized_market or None,
         "required_markers": required,
         "missing_markers": missing,
         "forbidden_markers": forbidden,
         "present_forbidden_markers": present_forbidden,
     }
     if result["status"] == "failed":
+        market_label = normalized_market or "GT"
         raise ValueError(
-            "Business Central invoice PDF did not match the approved MTM GT invoice form "
+            f"Business Central invoice PDF did not match the approved MTM {market_label} invoice form "
             f"for {invoice_number}. Missing markers: {missing or 'none'}. "
             f"Forbidden markers: {present_forbidden or 'none'}."
         )
@@ -396,6 +407,25 @@ def _configured_pdf_text_markers(env_name: str, default: tuple[str, ...]) -> lis
     if not raw_value:
         return list(default)
     return [part.strip() for part in raw_value.split("|") if part.strip()]
+
+
+def _market_pdf_env_name(base_name: str, market: str) -> str:
+    market_env_name = f"{base_name}_{market}" if market else ""
+    if market_env_name and os.getenv(market_env_name, "").strip():
+        return market_env_name
+    return base_name
+
+
+def _default_required_pdf_text(market: str) -> tuple[str, ...]:
+    if market == "MX":
+        return DEFAULT_MX_REQUIRED_PDF_TEXT
+    return DEFAULT_REQUIRED_PDF_TEXT
+
+
+def _default_forbidden_pdf_text(market: str) -> tuple[str, ...]:
+    if market == "MX":
+        return ("FACTRURA",)
+    return DEFAULT_FORBIDDEN_PDF_TEXT
 
 
 def _write_temp_pdf(content: bytes) -> Path:

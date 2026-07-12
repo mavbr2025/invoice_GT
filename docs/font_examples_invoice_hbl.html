@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Invoice and HBL Font Examples</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;600;700&family=Source+Sans+3:wght@400;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      color: #1f2933;
+      background: #f4f6f8;
+      font-family: Arial, sans-serif;
+    }
+
+    body {
+      margin: 0;
+      padding: 32px;
+    }
+
+    main {
+      max-width: 1120px;
+      margin: 0 auto;
+    }
+
+    h1 {
+      margin: 0 0 8px;
+      font: 700 24px/1.25 Arial, sans-serif;
+    }
+
+    .note {
+      margin: 0 0 24px;
+      color: #52616f;
+      font-size: 14px;
+      line-height: 1.45;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .sample {
+      background: #ffffff;
+      border: 1px solid #d8dee6;
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    .sample header {
+      padding: 14px 16px;
+      border-bottom: 1px solid #e2e8f0;
+      background: #fbfcfd;
+    }
+
+    .sample h2 {
+      margin: 0;
+      font-size: 20px;
+      line-height: 1.2;
+    }
+
+    .sample .label {
+      margin-top: 3px;
+      color: #697586;
+      font-size: 12px;
+    }
+
+    .doc {
+      padding: 16px;
+      font-size: 10px;
+      line-height: 1.34;
+    }
+
+    .doc h3 {
+      margin: 0 0 10px;
+      font-size: 15px;
+      line-height: 1.2;
+      letter-spacing: 0;
+    }
+
+    .row {
+      display: grid;
+      grid-template-columns: 88px 1fr;
+      gap: 8px;
+      margin-bottom: 5px;
+    }
+
+    .key {
+      color: #52616f;
+      font-weight: 600;
+    }
+
+    .divider {
+      height: 1px;
+      margin: 12px 0;
+      background: #e2e8f0;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 8px;
+      table-layout: fixed;
+    }
+
+    th,
+    td {
+      border: 1px solid #d8dee6;
+      padding: 5px 6px;
+      text-align: left;
+      vertical-align: top;
+      overflow-wrap: break-word;
+    }
+
+    th {
+      background: #eef2f6;
+      font-weight: 700;
+    }
+
+    .total {
+      margin-top: 10px;
+      text-align: right;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .aptos {
+      font-family: Aptos, "Aptos Display", Arial, sans-serif;
+    }
+
+    .source {
+      font-family: "Source Sans 3", Arial, sans-serif;
+    }
+
+    .noto {
+      font-family: "Noto Sans", Arial, sans-serif;
+    }
+
+    @media (max-width: 920px) {
+      body {
+        padding: 20px;
+      }
+
+      .grid {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Invoice and HBL Font Examples</h1>
+    <p class="note">Source Sans 3 and Noto Sans load from Google Fonts. Aptos uses your installed system font when available, otherwise it falls back to Arial.</p>
+
+    <section class="grid" aria-label="Font comparison">
+      <article class="sample aptos">
+        <header>
+          <h2>Aptos</h2>
+          <div class="label">Modern Microsoft default, clean and businesslike</div>
+        </header>
+        <div class="doc">
+          <h3>COMMERCIAL INVOICE</h3>
+          <div class="row"><span class="key">Invoice No.</span><span>INV-2026-0148</span></div>
+          <div class="row"><span class="key">Customer</span><span>Pacific Trade Logistics LLC</span></div>
+          <div class="row"><span class="key">Vessel</span><span>MAERSK ATLANTIC / Voyage 126E</span></div>
+          <div class="row"><span class="key">Route</span><span>Manzanillo, MX to Los Angeles, CA</span></div>
+          <div class="divider"></div>
+          <div class="row"><span class="key">HBL No.</span><span>HBL-MEX-884209</span></div>
+          <div class="row"><span class="key">Shipper</span><span>Exportadora del Bajio S.A. de C.V.</span></div>
+          <div class="row"><span class="key">Consignee</span><span>North Harbor Imports Inc.</span></div>
+          <table>
+            <thead>
+              <tr><th>Description</th><th>Qty</th><th>Amount</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>Ocean freight and documentation</td><td>1</td><td>USD 1,850.00</td></tr>
+              <tr><td>Terminal handling charges</td><td>1</td><td>USD 325.00</td></tr>
+            </tbody>
+          </table>
+          <div class="total">Total: USD 2,175.00</div>
+        </div>
+      </article>
+
+      <article class="sample source">
+        <header>
+          <h2>Source Sans 3</h2>
+          <div class="label">Compact, polished, excellent for dense tables</div>
+        </header>
+        <div class="doc">
+          <h3>COMMERCIAL INVOICE</h3>
+          <div class="row"><span class="key">Invoice No.</span><span>INV-2026-0148</span></div>
+          <div class="row"><span class="key">Customer</span><span>Pacific Trade Logistics LLC</span></div>
+          <div class="row"><span class="key">Vessel</span><span>MAERSK ATLANTIC / Voyage 126E</span></div>
+          <div class="row"><span class="key">Route</span><span>Manzanillo, MX to Los Angeles, CA</span></div>
+          <div class="divider"></div>
+          <div class="row"><span class="key">HBL No.</span><span>HBL-MEX-884209</span></div>
+          <div class="row"><span class="key">Shipper</span><span>Exportadora del Bajio S.A. de C.V.</span></div>
+          <div class="row"><span class="key">Consignee</span><span>North Harbor Imports Inc.</span></div>
+          <table>
+            <thead>
+              <tr><th>Description</th><th>Qty</th><th>Amount</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>Ocean freight and documentation</td><td>1</td><td>USD 1,850.00</td></tr>
+              <tr><td>Terminal handling charges</td><td>1</td><td>USD 325.00</td></tr>
+            </tbody>
+          </table>
+          <div class="total">Total: USD 2,175.00</div>
+        </div>
+      </article>
+
+      <article class="sample noto">
+        <header>
+          <h2>Noto Sans</h2>
+          <div class="label">Very readable, strong for international text</div>
+        </header>
+        <div class="doc">
+          <h3>COMMERCIAL INVOICE</h3>
+          <div class="row"><span class="key">Invoice No.</span><span>INV-2026-0148</span></div>
+          <div class="row"><span class="key">Customer</span><span>Pacific Trade Logistics LLC</span></div>
+          <div class="row"><span class="key">Vessel</span><span>MAERSK ATLANTIC / Voyage 126E</span></div>
+          <div class="row"><span class="key">Route</span><span>Manzanillo, MX to Los Angeles, CA</span></div>
+          <div class="divider"></div>
+          <div class="row"><span class="key">HBL No.</span><span>HBL-MEX-884209</span></div>
+          <div class="row"><span class="key">Shipper</span><span>Exportadora del Bajio S.A. de C.V.</span></div>
+          <div class="row"><span class="key">Consignee</span><span>North Harbor Imports Inc.</span></div>
+          <table>
+            <thead>
+              <tr><th>Description</th><th>Qty</th><th>Amount</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>Ocean freight and documentation</td><td>1</td><td>USD 1,850.00</td></tr>
+              <tr><td>Terminal handling charges</td><td>1</td><td>USD 325.00</td></tr>
+            </tbody>
+          </table>
+          <div class="total">Total: USD 2,175.00</div>
+        </div>
+      </article>
+    </section>
+  </main>
+</body>
+</html>

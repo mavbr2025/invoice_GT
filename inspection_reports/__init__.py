@@ -1,0 +1,1 @@
+"""Truck inspection report automation."""

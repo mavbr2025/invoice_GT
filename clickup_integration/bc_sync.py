@@ -206,7 +206,8 @@ def prepare_clickup_to_bc_customer_sync(
         clickup_address_line1 != bc_address_line1 or clickup_address_line2 != bc_address_line2
     ):
         proposed_updates["addressLine1"] = clickup_address_line1
-        proposed_updates["addressLine2"] = clickup_address_line2
+        if clickup_address_line2 or bc_address_line2:
+            proposed_updates["addressLine2"] = clickup_address_line2
         comparison["address"]["will_update"] = True
 
     if payment_term and payment_term["id"] != (bc_customer.get("paymentTermsId") or ""):

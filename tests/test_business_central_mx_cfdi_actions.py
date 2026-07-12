@@ -55,6 +55,26 @@ def test_stamp_mx_invoice_posts_empty_payload() -> None:
     assert result["market"] == "MX"
 
 
+def test_set_mx_payment_fields_posts_terms_and_method() -> None:
+    client = FakeBusinessCentralClient()
+
+    result = client.set_mx_payment_fields(
+        "draft-row-id",
+        payment_terms_code="PPD",
+        payment_method_code="99",
+        market="MX",
+    )
+
+    assert result["path"].endswith(
+        "mxSalesInvoiceDrafts(draft-row-id)/Microsoft.NAV.SetMxPaymentFields"
+    )
+    assert result["payload"] == {
+        "paymentTermsCode": "PPD",
+        "paymentMethodCode": "99",
+    }
+    assert result["market"] == "MX"
+
+
 def test_cancel_mx_invoice_with_substitution_posts_reason_and_substitute() -> None:
     client = FakeBusinessCentralClient()
 

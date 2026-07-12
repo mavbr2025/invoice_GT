@@ -22,6 +22,7 @@ docker build -f deploy/aws/Dockerfile -t mtm-clickup-invoice-webhook .
 docker run --rm -p 8000:8000 --env-file deploy/aws/env.invoice-webhook.example mtm-clickup-invoice-webhook
 curl http://localhost:8000/healthz
 curl http://localhost:8000/clickup/webhooks/invoice-sync/readiness
+curl http://localhost:8000/clickup/webhooks/inspection-invoice-sync/readiness
 ```
 
 Use a private env file for real credentials. Do not place secrets in git.
@@ -50,6 +51,17 @@ Recommended invoice readiness path:
 ```text
 /clickup/webhooks/invoice-sync/readiness
 ```
+
+Inspection invoices use a dedicated route so their JSON payload is never mixed
+with shipment-charge mappings:
+
+```text
+/clickup/webhooks/inspection-invoice-sync
+```
+
+Keep `INSPECTION_INVOICE_WEBHOOK_APPLY=false` for the first call. The route reads
+the Magna task's `Invoice Payload` field, validates the customer/item/FEL state,
+and returns the proposed BC header and lines without changing either system.
 
 ## Operational Guardrails
 

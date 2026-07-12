@@ -27,6 +27,10 @@ from clickup_integration.invoice_sync import (
 from clickup_integration.mapping import summarize_task_for_customer_mapping
 from clickup_integration.matcher import match_clickup_customer_to_bc
 from clickup_integration.writeback import prepare_clickup_bc_writeback
+from inspection_invoices.service import (
+    issue_inspection_invoice,
+    prepare_inspection_invoice_preview,
+)
 
 app = FastAPI(title="ClickUp to Business Central Customer Bridge")
 logging.basicConfig(level=logging.INFO)
@@ -64,6 +68,27 @@ def invoice_sync_readiness() -> dict[str, Any]:
         "ok_finops_status": settings.ok_finops_status,
         "charge_mapping_count": len(settings.charge_mappings),
         "line_type": "Item" if settings.charge_mappings else "Account",
+    }
+
+
+@app.get("/clickup/webhooks/inspection-invoice-sync/readiness")
+def inspection_invoice_sync_readiness() -> dict[str, Any]:
+    missing_runtime_config = [
+        name
+        for name in ("CLICKUP_WEBHOOK_TOKEN", "CLICKUP_ACCESS_TOKEN")
+        if not os.getenv(name, "").strip()
+    ]
+    return {
+        "status": "not_ready" if missing_runtime_config else "ready",
+        "missing_runtime_config": missing_runtime_config,
+        "apply_mode": _env_bool("INSPECTION_INVOICE_WEBHOOK_APPLY", default=False),
+        "market": os.getenv("INSPECTION_INVOICE_MARKET", "GT").strip().upper() or "GT",
+        "currency": os.getenv("INSPECTION_INVOICE_CURRENCY", "USD").strip().upper() or "USD",
+        "payload_field_id": os.getenv(
+            "INSPECTION_INVOICE_PAYLOAD_FIELD_ID",
+            "5e825df5-9a5e-45f8-87cf-0b1daa16b38f",
+        ).strip(),
+        "list_id": os.getenv("INSPECTION_INVOICE_CLICKUP_LIST_ID", "901707774763").strip(),
     }
 
 
@@ -519,6 +544,95 @@ async def clickup_invoice_sync(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@app.post("/clickup/webhooks/inspection-invoice-sync")
+@app.post("/clickup/webhooks/inspection-invoice-sync{webhook_path:path}")
+@app.post("/clickup/webhooks/inspection-invoice-sync/{webhook_path:path}")
+async def clickup_inspection_invoice_sync(
+    request: Request,
+    webhook_path: str = "",
+    x_webhook_token: str | None = Header(default=None, alias="X-Webhook-Token"),
+    authorization: str | None = Header(default=None, alias="Authorization"),
+) -> dict[str, Any]:
+    expected_token = os.getenv("CLICKUP_WEBHOOK_TOKEN", "").strip()
+    if not expected_token:
+        raise HTTPException(status_code=500, detail="CLICKUP_WEBHOOK_TOKEN is not configured.")
+    provided_token = _extract_webhook_token(
+        x_webhook_token=x_webhook_token,
+        authorization=authorization,
+    )
+    if provided_token != expected_token:
+        raise HTTPException(status_code=401, detail="Invalid webhook token.")
+
+    payload = await _safe_json(request)
+    task_id = extract_task_id(payload) or extract_task_id_from_path(
+        request.url.path,
+        base_path="/clickup/webhooks/inspection-invoice-sync",
+    )
+    if not task_id:
+        return {"status": "ignored", "reason": "missing_task_id"}
+
+    try:
+        clickup = ClickUpClient(ClickUpSettings.from_env())
+        bc = BusinessCentralClient(BusinessCentralSettings.from_env())
+        team_id = _resolve_clickup_team_id(clickup)
+        use_custom_task_ids = _env_bool("CLICKUP_WEBHOOK_CUSTOM_TASK_IDS", default=True)
+        task = _fetch_clickup_task_for_webhook(
+            clickup=clickup,
+            task_id=task_id,
+            custom_task_ids=use_custom_task_ids,
+            team_id=team_id,
+        )
+        if task is None:
+            return {"status": "ignored", "reason": "task_lookup_failed", "task_id": task_id}
+
+        preview = prepare_inspection_invoice_preview(task=task, bc_client=bc)
+        apply_mode = _env_bool("INSPECTION_INVOICE_WEBHOOK_APPLY", default=False)
+        if not apply_mode or preview.get("status") != "dry_run_ready":
+            result = {
+                "status": "processed" if preview.get("status") == "dry_run_ready" else "blocked",
+                "mode": "dry_run",
+                "task_id": task.get("id"),
+                "result": preview,
+            }
+            _log_webhook_result(task_id=str(task.get("id") or task_id), result=result)
+            return result
+
+        issued = issue_inspection_invoice(task=task, bc_client=bc)
+        if issued.get("status") != "applied":
+            result = {"status": "failed", "mode": "apply", "task_id": task.get("id"), "result": issued}
+            _log_webhook_result(task_id=str(task.get("id") or task_id), result=result)
+            return result
+
+        summary = summarize_task_for_customer_mapping(task)
+        delivery = finalize_clickup_issued_invoices(
+            clickup=clickup,
+            bc_client=bc,
+            clickup_summary=summary,
+            invoice_result=issued,
+            settings=InvoiceAutomationSettings.from_env(),
+            workspace_id=team_id,
+            mark_status=False,
+        )
+        writeback = _write_inspection_invoice_number(clickup=clickup, task=task, issued=issued)
+        final_status = _mark_inspection_invoice_complete(clickup=clickup, task=task)
+        result = {
+            "status": "processed",
+            "mode": "apply",
+            "task_id": task.get("id"),
+            "result": issued,
+            "delivery": delivery,
+            "writeback": writeback,
+            "final_status_update": final_status,
+        }
+        _log_webhook_result(task_id=str(task.get("id") or task_id), result=result)
+        return result
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Inspection invoice webhook failed task_id=%s", task_id)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @app.post("/clickup/webhooks/invoice-delivery-recovery")
 @app.post("/clickup/webhooks/invoice-sync/deliver-posted")
 async def clickup_invoice_deliver_posted(
@@ -815,17 +929,56 @@ def _extract_invoice_numbers(payload: dict[str, Any]) -> list[str]:
 
     values = raw_value if isinstance(raw_value, list) else str(raw_value).replace(";", ",").split(",")
     invoice_numbers: list[str] = []
+    market = os.getenv("CLICKUP_INVOICE_MARKET", "GT").strip().upper() or "GT"
+    prefixes = _posted_invoice_number_prefixes_for_market(market)
     for value in values:
         text = str(value or "").strip().upper()
         if not text:
             continue
-        if not text.startswith("GTFVR"):
+        if not any(text.startswith(prefix) for prefix in prefixes):
             raise HTTPException(
                 status_code=400,
-                detail=f"Only posted GT invoice numbers are supported for delivery recovery: {text}",
+                detail=f"Only posted {market} invoice numbers are supported for delivery recovery: {text}",
             )
         invoice_numbers.append(text)
     return list(dict.fromkeys(invoice_numbers))
+
+
+def _posted_invoice_number_prefixes_for_market(market: str) -> tuple[str, ...]:
+    raw_value = os.getenv(f"BC_MARKET_{market}_POSTED_INVOICE_PREFIXES", "").strip()
+    if raw_value:
+        return tuple(part.strip().upper() for part in raw_value.split(",") if part.strip())
+    if market == "MX":
+        return ("B",)
+    return ("GTFVR",)
+
+
+def _write_inspection_invoice_number(
+    *,
+    clickup: ClickUpClient,
+    task: dict[str, Any],
+    issued: dict[str, Any],
+) -> dict[str, Any]:
+    finalized = (issued.get("finalized_invoices") or [{}])[0]
+    invoice = finalized.get("posted_invoice_after_stamp") or {}
+    invoice_number = str(invoice.get("number") or finalized.get("number") or "").strip()
+    invoice_id = str(invoice.get("id") or "").strip()
+    updates: list[dict[str, Any]] = []
+    for env_name, value in (
+        ("INSPECTION_INVOICE_BC_INVOICE_NUMBER_FIELD_ID", invoice_number),
+        ("INSPECTION_INVOICE_BC_INVOICE_ID_FIELD_ID", invoice_id),
+    ):
+        field_id = os.getenv(env_name, "").strip()
+        if field_id and value:
+            updates.append(clickup.set_task_custom_field_value(str(task["id"]), field_id, value))
+    return {"invoice_number": invoice_number or None, "invoice_id": invoice_id or None, "updates": updates}
+
+
+def _mark_inspection_invoice_complete(*, clickup: ClickUpClient, task: dict[str, Any]) -> dict[str, Any] | None:
+    target_status = os.getenv("INSPECTION_INVOICE_FINAL_STATUS", "").strip()
+    if not target_status:
+        return None
+    return clickup.update_task(str(task["id"]), status=target_status)
 
 
 def extract_task_id_from_path(path: str, *, base_path: str) -> str | None:

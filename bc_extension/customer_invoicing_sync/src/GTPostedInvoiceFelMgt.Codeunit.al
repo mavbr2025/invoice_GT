@@ -467,7 +467,6 @@ codeunit 71002 "MTM GT Posted Inv FEL Mgt"
         GranTotalIVA: Decimal;
         GranTotalT: Text;
         GranTotalIVAT: Text;
-        ValidaFrase: Boolean;
         CompanyPais: Text;
         ClientePais: Text;
         RelatedInvoiceNo: Code[20];
@@ -498,16 +497,6 @@ codeunit 71002 "MTM GT Posted Inv FEL Mgt"
                 Adendas := LineasVenta.Description;
             until LineasVenta.Next() = 0;
 
-        LineasVenta.Reset();
-        LineasVenta.SetRange("Document No.", SalesCrMemo."No.");
-        LineasVenta.SetRange(Type, LineasVenta.Type::Item);
-        if LineasVenta.FindSet() then
-            repeat
-                ImpuestosinfoSAT.Get(LineasVenta."VAT Prod. Posting Group");
-                if ImpuestosinfoSAT."Codigo Unidad Gravable" = Format(2) then
-                    ValidaFrase := true;
-            until LineasVenta.Next() = 0;
-
         if Cliente.TipoEspecial then
             TipoEspecial := 'TipoEspecial="CUI"';
         if Cliente.TipoEspecialEXT then
@@ -526,8 +515,6 @@ codeunit 71002 "MTM GT Posted Inv FEL Mgt"
             '<dte:DireccionReceptor><dte:Direccion>' + EscapeXml(Cliente.Address) + '</dte:Direccion><dte:CodigoPostal>' + EscapeXml(Cliente."Post Code") + '</dte:CodigoPostal><dte:Municipio>' + EscapeXml(Cliente.City) + '</dte:Municipio><dte:Departamento>' + EscapeXml(Cliente.County) + '</dte:Departamento><dte:Pais>' + EscapeXml(ClientePais) + '</dte:Pais></dte:DireccionReceptor>' +
             '</dte:Receptor>' +
             '<dte:Frases><dte:Frase CodigoEscenario="1" TipoFrase="1"/>';
-        if ValidaFrase then
-            Body += '<dte:Frase CodigoEscenario="24" TipoFrase="4"/>';
         Body += '</dte:Frases><dte:Items>';
 
         SubBody := BuildNotaCreditoGTLineXml(SalesCrMemo, GranTotal, GranTotalIVA, GranTotalT, GranTotalIVAT, ImpuestosinfoSAT);

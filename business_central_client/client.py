@@ -737,6 +737,28 @@ class BusinessCentralClient:
             market=market,
         )
 
+    def set_mx_payment_fields(
+        self,
+        sales_invoice_id: str,
+        *,
+        payment_terms_code: str,
+        payment_method_code: str,
+        company_id: str | None = None,
+        market: str | None = None,
+    ) -> dict[str, Any]:
+        return self.post_to_company(
+            (
+                "/api/mtmlogix/invoiceSync/v1.0/companies({company_id})/"
+                f"mxSalesInvoiceDrafts({sales_invoice_id})/Microsoft.NAV.SetMxPaymentFields"
+            ),
+            {
+                "paymentTermsCode": payment_terms_code,
+                "paymentMethodCode": payment_method_code,
+            },
+            company_id=company_id,
+            market=market,
+        )
+
     def create_sales_credit_memo(
         self,
         payload: dict[str, Any],

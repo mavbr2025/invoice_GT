@@ -56,6 +56,7 @@ class InvoiceAutomationSettings:
     inland_account_number: str | None
     destination_account_number: str | None
     charge_mappings: tuple[InvoiceChargeMapping, ...] = ()
+    split_invoice_by_item_prefix: bool = True
     invoice_status_field_ids: tuple[str, ...] = ()
     eta_field_ids: tuple[str, ...] = ()
     bc_customer_name_field_names: tuple[str, ...] = ()
@@ -215,6 +216,12 @@ class InvoiceAutomationSettings:
             charge_mappings=load_invoice_charge_mappings(charge_mapping_path)
             if charge_mapping_path
             else (),
+            split_invoice_by_item_prefix=load_invoice_charge_mapping_split_by_item_prefix(
+                charge_mapping_path,
+                default=True,
+            )
+            if charge_mapping_path
+            else True,
         )
 
 
@@ -413,6 +420,24 @@ def prepare_clickup_bc_sales_invoice_preview(
                 "customer_resolution": customer_resolution,
                 "customer_fel_readiness": customer_fel_readiness,
             }
+
+    market_invoice_settings = _resolve_market_invoice_settings(
+        bc_client=bc_client,
+        bc_customer=bc_customer,
+        market=market,
+        customer_number=customer_number,
+        customer_id=customer_id,
+    )
+    if market_invoice_settings["status"] != "ready":
+        return {
+            "status": "market_invoice_readiness_failed",
+            "message": market_invoice_settings["message"],
+            "market": market,
+            "currency": currency,
+            "task_status": task_status,
+            "customer_resolution": customer_resolution,
+            "market_invoice_settings": market_invoice_settings,
+        }
 
     reference = _resolve_reference(clickup_summary, custom_fields, config)
     shipment_metadata = _resolve_shipment_metadata(clickup_summary, custom_fields, config)
@@ -636,7 +661,7 @@ def prepare_clickup_bc_sales_invoice_preview(
         header_payload=header_payload,
         line_payloads=line_payloads,
         line_sources=line_sources,
-        split_by_item_prefix=bool(config.charge_mappings),
+        split_by_item_prefix=bool(config.charge_mappings) and config.split_invoice_by_item_prefix,
         shipment_metadata=shipment_metadata,
     )
     invoice_validation = _validate_proposed_invoice_totals(
@@ -724,6 +749,7 @@ def prepare_clickup_bc_sales_invoice_preview(
         "customer_id": customer_id or None,
         "customer_number": customer_number or None,
         "customer_resolution": customer_resolution,
+        "market_invoice_settings": market_invoice_settings,
         "shipment_metadata": shipment_metadata,
         "header_warnings": header_warnings,
         "eta_date": eta_date.isoformat() if eta_date else None,
@@ -789,9 +815,44 @@ def apply_clickup_bc_sales_invoice(
                 "created_lines": created_lines,
             }
 
+        mx_payment_fields_update = None
+        if preview["market"] == "MX":
+            try:
+                mx_payment_fields_update = _set_mx_payment_fields_on_draft(
+                    bc_client=bc_client,
+                    sales_invoice_id=str(created_invoice["id"]),
+                    market=preview["market"],
+                    market_invoice_settings=preview.get("market_invoice_settings") or {},
+                )
+            except Exception as exc:
+                logger.exception(
+                    "BC MX payment-field update failed task_id=%s invoice_id=%s invoice_group=%s",
+                    clickup_summary.get("task_id"),
+                    created_invoice.get("id"),
+                    proposed_invoice.get("invoice_group"),
+                )
+                return {
+                    **preview,
+                    "status": "failed_partial",
+                    "failed_stage": "set_mx_payment_fields",
+                    "message": str(exc),
+                    "created_invoice": {
+                        "invoice_group": proposed_invoice.get("invoice_group"),
+                        **created_invoice,
+                    },
+                    "created_invoices": [
+                        {
+                            "invoice_group": proposed_invoice.get("invoice_group"),
+                            **created_invoice,
+                        }
+                    ],
+                    "created_lines": created_lines,
+                }
+
         created_invoices.append(
             {
                 "invoice_group": proposed_invoice.get("invoice_group"),
+                "mx_payment_fields_update": mx_payment_fields_update,
                 **created_invoice,
             }
         )
@@ -870,7 +931,11 @@ def issue_clickup_bc_sales_invoice(
     completed_stages: list[str] = []
     retry_existing_posted_invoices = _existing_duplicate_invoices_for_retry(result)
     if result.get("status") != "applied" and not retry_existing_posted_invoices:
-        return {**result, "completed_stages": completed_stages, "failed_stage": "create_sales_invoice"}
+        return {
+            **result,
+            "completed_stages": completed_stages,
+            "failed_stage": result.get("failed_stage") or "create_sales_invoice",
+        }
 
     config = settings or InvoiceAutomationSettings.from_env()
     market = result["market"]
@@ -917,24 +982,37 @@ def issue_clickup_bc_sales_invoice(
                 invoice_number=invoice_number,
                 market=market,
             )
-            if _is_stamp_received(fel_row):
-                sync_response = {"status": "already_stamp_received"}
+            if market == "MX":
+                sync_response = {"status": "not_applicable", "market": "MX"}
                 fel_row_after_sync = fel_row
+                current_stage = "stamp_mx_invoice"
             else:
-                sync_response = bc_client.sync_posted_invoice_fel_line_descriptions(
-                    fel_row["id"],
-                    market=market,
-                )
-                fel_row_after_sync = (
-                    bc_client.get_posted_invoice_fel_description_by_number(invoice_number, market=market)
-                    or fel_row
-                )
-            if "sync_fel_descriptions" not in completed_stages:
-                completed_stages.append("sync_fel_descriptions")
-            current_stage = "stamp_fel_invoice"
+                if _is_stamp_received(fel_row):
+                    sync_response = {"status": "already_stamp_received"}
+                    fel_row_after_sync = fel_row
+                else:
+                    sync_response = bc_client.sync_posted_invoice_fel_line_descriptions(
+                        fel_row["id"],
+                        market=market,
+                    )
+                    fel_row_after_sync = (
+                        bc_client.get_posted_invoice_fel_description_by_number(invoice_number, market=market)
+                        or fel_row
+                    )
+                if "sync_fel_descriptions" not in completed_stages:
+                    completed_stages.append("sync_fel_descriptions")
+                current_stage = "stamp_fel_invoice"
+
             if _is_stamp_received(fel_row_after_sync):
                 stamp_response = {"status": "already_stamp_received"}
                 fel_row_after_stamp = fel_row_after_sync
+            elif market == "MX":
+                stamp_response = bc_client.stamp_mx_invoice(fel_row["id"], market=market)
+                fel_row_after_stamp = _wait_for_stamp_received(
+                    bc_client=bc_client,
+                    invoice_number=invoice_number,
+                    market=market,
+                )
             else:
                 stamp_response = bc_client.stamp_posted_invoice_fel(fel_row["id"], market=market)
                 fel_row_after_stamp = _wait_for_stamp_received(
@@ -949,7 +1027,7 @@ def issue_clickup_bc_sales_invoice(
             gt_registered_invoice = bc_client.get_gt_registered_invoice_by_number(
                 invoice_number,
                 market=market,
-            )
+            ) if market == "GT" else None
             finalized_invoices.append(
                 {
                     "invoice_group": posted_invoice.get("invoice_group"),
@@ -963,8 +1041,9 @@ def issue_clickup_bc_sales_invoice(
                     "stamp_response": stamp_response,
                 }
             )
-            if "stamp_fel_invoice" not in completed_stages:
-                completed_stages.append("stamp_fel_invoice")
+            completed_stamp_stage = "stamp_mx_invoice" if market == "MX" else "stamp_fel_invoice"
+            if completed_stamp_stage not in completed_stages:
+                completed_stages.append(completed_stamp_stage)
     except Exception as exc:
         logger.exception(
             "BC invoice post/FEL issue failed task_id=%s stage=%s",
@@ -1020,10 +1099,11 @@ def _existing_duplicate_invoices_for_retry(result: dict[str, Any]) -> list[dict[
         return []
 
     posted_invoices: list[dict[str, Any]] = []
+    market = str(result.get("market") or "").strip().upper() or None
     for duplicate in duplicate_invoices:
         existing_invoice = duplicate.get("existing_invoice") or {}
         invoice_number = str(existing_invoice.get("number") or "").strip()
-        if not _looks_posted_invoice_number(invoice_number):
+        if not _looks_posted_invoice_number(invoice_number, market=market):
             return []
         fel_row = existing_invoice.get("existing_fel_row") or {}
         if _is_canceled_sales_invoice(existing_invoice):
@@ -1050,14 +1130,14 @@ def _resolve_posted_sales_invoice_after_post(
     external_document_number = str(created_invoice.get("externalDocumentNumber") or "").strip()
     for _attempt in range(3):
         posted_invoice = bc_client.get_entity("salesInvoices", invoice_id, market=market)
-        if posted_invoice and _looks_posted_invoice_number(posted_invoice.get("number")):
+        if posted_invoice and _looks_posted_invoice_number(posted_invoice.get("number"), market=market):
             return posted_invoice
         if external_document_number:
             posted_invoice = bc_client.get_posted_sales_invoice_by_external_document_number(
                 external_document_number,
                 market=market,
             )
-            if posted_invoice and _looks_posted_invoice_number(posted_invoice.get("number")):
+            if posted_invoice and _looks_posted_invoice_number(posted_invoice.get("number"), market=market):
                 return posted_invoice
         time.sleep(2)
     raise ValueError(
@@ -1105,8 +1185,25 @@ def _is_stamp_received(row: dict[str, Any]) -> bool:
     return " ".join(str(row.get("electronicDocumentStatus") or "").strip().lower().split()) == "stamp received"
 
 
-def _looks_posted_invoice_number(value: Any) -> bool:
-    return str(value or "").strip().upper().startswith("GTFVR")
+def _looks_posted_invoice_number(value: Any, *, market: str | None = None) -> bool:
+    text = str(value or "").strip().upper()
+    if not text:
+        return False
+    prefixes = _posted_invoice_prefixes(market)
+    return any(text.startswith(prefix) for prefix in prefixes)
+
+
+def _posted_invoice_prefixes(market: str | None) -> tuple[str, ...]:
+    normalized_market = str(market or "").strip().upper()
+    env_name = f"BC_MARKET_{normalized_market}_POSTED_INVOICE_PREFIXES" if normalized_market else ""
+    raw_value = os.getenv(env_name, "").strip() if env_name else ""
+    if raw_value:
+        return tuple(part.strip().upper() for part in raw_value.split(",") if part.strip())
+    if normalized_market == "MX":
+        return ("B",)
+    if normalized_market == "GT":
+        return ("GTFVR",)
+    return ("GTFVR", "B")
 
 
 
@@ -1877,6 +1974,121 @@ def _validate_customer_fel_readiness(
     }
 
 
+def _resolve_market_invoice_settings(
+    *,
+    bc_client: BusinessCentralClient,
+    bc_customer: dict[str, Any] | None,
+    market: str,
+    customer_number: str | None,
+    customer_id: str | None,
+) -> dict[str, Any]:
+    if market != "MX":
+        return {"status": "ready", "market": market}
+
+    if not bc_customer:
+        return {
+            "status": "missing_customer",
+            "message": (
+                f"Business Central customer {customer_number or customer_id or 'UNKNOWN'} could not be read "
+                "before Mexico CFDI validation."
+            ),
+            "market": market,
+        }
+
+    resolved_customer_number = str(bc_customer.get("number") or customer_number or "").strip()
+    resolved_customer_id = str(bc_customer.get("id") or customer_id or "").strip()
+    try:
+        customer_invoicing = _read_customer_invoicing_fel_row(
+            bc_client=bc_client,
+            customer_number=resolved_customer_number,
+            customer_id=resolved_customer_id,
+            market=market,
+        )
+    except Exception as exc:
+        return {
+            "status": "customer_invoicing_api_unavailable",
+            "message": (
+                f"Business Central customer {resolved_customer_number or resolved_customer_id or 'UNKNOWN'} "
+                "could not be checked against the customer invoicing API before Mexico CFDI issuance. "
+                f"Detail: {exc}"
+            ),
+            "market": market,
+            "customer_number": resolved_customer_number,
+            "customer_id": resolved_customer_id,
+        }
+
+    if not customer_invoicing:
+        return {
+            "status": "missing_customer_invoicing_row",
+            "message": (
+                f"Business Central customer {resolved_customer_number or resolved_customer_id or 'UNKNOWN'} "
+                "could not be found in the customer invoicing API before Mexico CFDI issuance."
+            ),
+            "market": market,
+            "customer_number": resolved_customer_number,
+            "customer_id": resolved_customer_id,
+        }
+
+    payment_terms_code = str(customer_invoicing.get("paymentTermsCode") or "").strip()
+    payment_method_code = str(customer_invoicing.get("paymentMethodCode") or "").strip()
+    missing: list[str] = []
+    if not payment_terms_code:
+        missing.append("Business Central customer Payment Terms Code")
+    if not payment_method_code:
+        missing.append("Business Central customer Payment Method Code")
+    if missing:
+        return {
+            "status": "missing_mx_payment_fields",
+            "message": (
+                "Mexico CFDI issuance requires customer payment terms and payment method codes before posting. "
+                f"Missing: {', '.join(missing)}."
+            ),
+            "market": market,
+            "customer_number": resolved_customer_number,
+            "customer_id": resolved_customer_id,
+            "missing_fields": missing,
+            "customer_invoicing": customer_invoicing,
+        }
+
+    return {
+        "status": "ready",
+        "market": market,
+        "customer_number": resolved_customer_number,
+        "customer_id": resolved_customer_id,
+        "paymentTermsCode": payment_terms_code,
+        "paymentMethodCode": payment_method_code,
+        "customer_invoicing": customer_invoicing,
+        "paymentComplement": {
+            "status": "pending_future_architecture",
+            "message": "Payment complement automation is intentionally outside the invoice-only issuance path.",
+        },
+    }
+
+
+def _set_mx_payment_fields_on_draft(
+    *,
+    bc_client: BusinessCentralClient,
+    sales_invoice_id: str,
+    market: str,
+    market_invoice_settings: dict[str, Any],
+) -> dict[str, Any]:
+    payment_terms_code = str(market_invoice_settings.get("paymentTermsCode") or "").strip()
+    payment_method_code = str(market_invoice_settings.get("paymentMethodCode") or "").strip()
+    if not payment_terms_code or not payment_method_code:
+        raise ValueError("Mexico invoice draft is missing paymentTermsCode or paymentMethodCode.")
+    if not hasattr(bc_client, "set_mx_payment_fields"):
+        raise ValueError(
+            "Business Central client does not expose set_mx_payment_fields. "
+            "Publish/use the MTM MX sales invoice draft API before automated Mexico issuance."
+        )
+    return bc_client.set_mx_payment_fields(
+        sales_invoice_id,
+        payment_terms_code=payment_terms_code,
+        payment_method_code=payment_method_code,
+        market=market,
+    )
+
+
 def _read_customer_invoicing_fel_row(
     *,
     bc_client: BusinessCentralClient,
@@ -1901,6 +2113,11 @@ def _resolve_reference(
     explicit = _first_present_field(custom_fields, config.reference_field_names)
     if explicit:
         return explicit
+    market = str(clickup_summary.get("market") or "").strip().upper()
+    if market == "MX":
+        shipment_name = str(clickup_summary.get("name") or "").strip()
+        if shipment_name:
+            return shipment_name
     for fallback in (clickup_summary.get("custom_id"), clickup_summary.get("task_id")):
         if fallback is not None and str(fallback).strip():
             return str(fallback).strip()
@@ -2342,6 +2559,26 @@ def load_invoice_charge_mappings(path: str | os.PathLike[str]) -> tuple[InvoiceC
         )
 
     return tuple(mappings)
+
+
+def load_invoice_charge_mapping_split_by_item_prefix(
+    path: str | os.PathLike[str],
+    *,
+    default: bool,
+) -> bool:
+    mapping_path = Path(path)
+    if not mapping_path.exists():
+        raise ValueError(f"Invoice charge mapping file does not exist: {mapping_path}")
+
+    payload = json.loads(mapping_path.read_text(encoding="utf-8"))
+    value = payload.get("split_by_item_prefix")
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() not in {"0", "false", "no", "off"}
+    return bool(value)
 
 
 def _env_invoice_charge_mapping_path(market: str) -> str | None:

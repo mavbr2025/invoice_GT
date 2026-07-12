@@ -32,6 +32,13 @@ tmp/
 *.sqlite3
 *.zip
 
+# Reproducible track-and-trace run outputs; keep only the source fixtures.
+docs/track_trace_fixtures/generated/
+docs/track_trace_fixtures/run_*/
+
+# Independent workspace, intentionally outside this invoice-automation repository.
+/WhatsApp Integration/
+
 # Business Central build artifacts
 *.app
 .alpackages/

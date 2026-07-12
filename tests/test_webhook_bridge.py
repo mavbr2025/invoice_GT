@@ -5,6 +5,7 @@ from reportlab.pdfgen import canvas
 from clickup_integration.config import ClickUpSettings
 from clickup_integration.invoice_sync import InvoiceAutomationSettings, InvoiceChargeMapping
 from webhook_bridge.main import (
+    _extract_invoice_numbers,
     _fetch_clickup_task_for_webhook,
     _infer_clickup_team_id,
     app,
@@ -41,6 +42,14 @@ def test_customer_webhook_accepts_task_id_path_before_auth(monkeypatch) -> None:
     )
 
     assert response.status_code == 401
+
+
+def test_extract_invoice_numbers_accepts_mx_posted_prefix(monkeypatch) -> None:
+    monkeypatch.setenv("CLICKUP_INVOICE_MARKET", "MX")
+
+    result = _extract_invoice_numbers({"invoice_numbers": "B0003342, B0003342"})
+
+    assert result == ["B0003342"]
 
 
 def test_customer_webhook_accepts_clickup_appended_task_id_before_auth(monkeypatch) -> None:

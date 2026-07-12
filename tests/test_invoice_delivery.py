@@ -261,3 +261,23 @@ def test_validate_invoice_pdf_layout_blocks_legacy_or_wrong_form_pdf() -> None:
             invoice_number="GTFVR0003945",
             invoice_group="INT",
         )
+
+
+def test_validate_invoice_pdf_layout_accepts_mx_cfdi_markers() -> None:
+    mx_pdf = make_pdf_bytes(
+        "Factura",
+        "Version CFDI: 4.0",
+        "Folio Fiscal",
+        "Sello Digital del CFDI",
+        "Este documento es una representacion impresa de un CFDI",
+    )
+
+    result = validate_invoice_pdf_layout(
+        mx_pdf,
+        invoice_number="B0003342",
+        invoice_group="INT",
+        market="MX",
+    )
+
+    assert result["status"] == "passed"
+    assert result["market"] == "MX"

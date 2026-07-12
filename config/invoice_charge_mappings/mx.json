@@ -1,0 +1,137 @@
+{
+  "market": "MX",
+  "source": "Initial Mexico shipment invoice mapping based on live SHP-30131 field discovery and MX BC item validation.",
+  "line_type": "Item",
+  "skip_zero_amounts": true,
+  "amount_basis": "pre_tax_unit_price",
+  "split_by_item_prefix": false,
+  "tax_note": "BC item and posting setup remain the source of truth for Mexico tax behavior.",
+  "mappings": [
+    {
+      "charge_name": "Freight (Ocean/Truck/Air)",
+      "clickup_field_id": "c8935d06-7f43-46c5-a1ef-444314dca0e9",
+      "clickup_field_name": "Freight (Ocean/Truck/Air)",
+      "bc_item_number": "INT000000026",
+      "bc_description": "COORDINACION VIRTUAL DE TRANSPORTE MARITIMO"
+    },
+    {
+      "charge_name": "Origin Charges",
+      "clickup_field_id": "fe89391f-35e7-429e-a03c-b19f529d79e5",
+      "clickup_field_name": "Origin Charges",
+      "bc_item_number": "INT000000011",
+      "bc_description": "ORIGIN CHARGES"
+    },
+    {
+      "charge_name": "Inland origin",
+      "clickup_field_id": "6907a317-75fd-4c28-a683-adab0cf212dd",
+      "clickup_field_name": "Inland origin",
+      "bc_item_number": "INT000000017",
+      "bc_description": "INLAND ORIGIN"
+    },
+    {
+      "charge_name": "Customs Broker Origin",
+      "clickup_field_id": "fd301630-ec8b-4b30-b011-41412aa02576",
+      "clickup_field_name": "Customs Broker Origin",
+      "bc_item_number": "INT000000028",
+      "bc_description": "COORDINACION DE AGENTE ADUANAL"
+    },
+    {
+      "charge_name": "Emergency Surcharge",
+      "clickup_field_id": "eed2e3aa-781e-4bbf-86a4-3353fc7d057d",
+      "clickup_field_name": "Emergency Surcharge",
+      "bc_item_number": "INT000000026",
+      "bc_description": "TRANSPORTE MARITIMO"
+    },
+    {
+      "charge_name": "Food Grade Container",
+      "clickup_field_id": "47789ded-d701-41d0-9141-a9153a6080b0",
+      "clickup_field_name": "Food Grade Container",
+      "bc_item_number": "INT000000026",
+      "bc_description": "FOOD GRADE CONTAINER"
+    },
+    {
+      "charge_name": "Overweight",
+      "clickup_field_id": "5fec0ba3-5ec6-4549-89ba-3dd1bb45ae2e",
+      "clickup_field_name": "Overweight",
+      "bc_item_number": "INT000000026",
+      "bc_description": "OVERWEIGHT"
+    },
+    {
+      "charge_name": "Doc Fee Origin",
+      "clickup_field_id": "32194420-8e3e-43ec-ae44-a74397cffacd",
+      "clickup_field_name": "Doc Fee Origin",
+      "bc_item_number": "INT000000022",
+      "bc_description": "DOCUMENT FEE"
+    },
+    {
+      "charge_name": "Inspection at Origin",
+      "clickup_field_id": "e38dd1cf-5e2d-4ef0-90d3-a12131f31b49",
+      "clickup_field_name": "Inspection at Origin",
+      "bc_item_number": "INT000000031",
+      "bc_description": "INSPECCIONES EN ORIGEN"
+    },
+    {
+      "charge_name": "Cargo Maritime Insurance",
+      "clickup_field_id": "c9738c8c-ab09-4161-9fce-6d7258477ec5",
+      "clickup_field_name": "Cargo Maritime Insurance",
+      "bc_item_number": "INT000000007",
+      "bc_description": "Insurance"
+    },
+    {
+      "charge_name": "Destination Charges",
+      "clickup_field_id": "4ad13e04-a8c6-4069-9e6b-f5e4b6b734bd",
+      "clickup_field_name": "Destination Charges",
+      "bc_item_number": "NAT00000037",
+      "bc_description": "DESTINATION CHARGES"
+    },
+    {
+      "charge_name": "Doc Fee Destination",
+      "clickup_field_id": "dc5001e4-cb9c-4cab-a306-b97faa323753",
+      "clickup_field_name": "Doc Fee Destination",
+      "bc_item_number": "NAT00000009",
+      "bc_description": "DOCUMENT FEE"
+    },
+    {
+      "charge_name": "CT / Handling Fee",
+      "clickup_field_id": "4c3fb385-15cf-4250-9e3c-e1c93434cb7f",
+      "clickup_field_name": "CT / Handling Fee",
+      "bc_item_number": "NAT00000010",
+      "bc_description": "HANDLING FEE"
+    },
+    {
+      "charge_name": "Customs Broker",
+      "clickup_field_id": "c88a27b6-6325-44bb-983a-3948017061b4",
+      "clickup_field_name": "Customs Broker",
+      "bc_item_number": "INT000000016",
+      "bc_description": "CUSTOM AGENT"
+    },
+    {
+      "charge_name": "Inland Destination",
+      "clickup_field_id": "76c18eed-e9c0-4a0e-94ae-7f3d41a33970",
+      "clickup_field_name": "Inland Destination",
+      "bc_item_number": "NAT00000015",
+      "bc_description": "FLETE TERRESTRE"
+    },
+    {
+      "charge_name": "Almacenaje al cliente (USD)",
+      "clickup_field_id": "16edb6b2-ba0c-4a1e-94f0-f3f511d2f647",
+      "clickup_field_name": "Almacenaje al cliente (USD)",
+      "bc_item_number": "NAT00000034",
+      "bc_description": "ALMACENAJES EN PUERTO"
+    },
+    {
+      "charge_name": "D&D al cliente (USD)",
+      "clickup_field_id": "e0dce9a5-00f2-4aa1-b563-b997c29136bc",
+      "clickup_field_name": "D&D al cliente (USD)",
+      "bc_item_number": "NAT00000033",
+      "bc_description": "DEMORA"
+    },
+    {
+      "charge_name": "Custody",
+      "clickup_field_id": "2a995022-8edb-4516-9e45-e36f0eaac4d1",
+      "clickup_field_name": "Custody",
+      "bc_item_number": "NAT00000014",
+      "bc_description": "CUSTODIA Y SEGURIDAD EN DESTINO"
+    }
+  ]
+}
