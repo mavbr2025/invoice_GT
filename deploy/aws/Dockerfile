@@ -11,6 +11,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY business_central_client ./business_central_client
 COPY clickup_integration ./clickup_integration
+COPY inspection_invoices ./inspection_invoices
 COPY config ./config
 COPY scripts ./scripts
 COPY webhook_bridge ./webhook_bridge
