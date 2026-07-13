@@ -1,22 +1,19 @@
 {
   "id": "gt_int_two_step_special_request",
-  "name": "GT INT two-step invoice special request",
-  "status": "manual_special_request_only",
-  "automated": false,
-  "webhook_enabled": false,
+  "name": "GT ALB Importaciones INT freight and emergency split",
+  "status": "active_customer_rule",
+  "automated": true,
+  "webhook_enabled": true,
   "customer_specific": true,
   "market": "GT",
   "invoice_group": "INT",
-  "requirement": "For approved customer-specific exceptions, issue the INT portion of one shipment as two separate Business Central invoices instead of one combined INT invoice.",
-  "source_script": "scripts/replace_gt_invoice_split_int_charges_once.py",
+  "customer_number": "C00056",
+  "requirement": "For ALB Importaciones, issue the INT portion of each eligible shipment as two separate Business Central invoices: freight and emergency surcharge.",
+  "source_module": "clickup_integration/invoice_sync.py",
   "trigger_policy": {
-    "allowed_trigger": "manual_operator_command",
-    "blocked_triggers": [
-      "ClickUp webhook",
-      "automatic invoice issuance",
-      "scheduled job"
-    ],
-    "reason": "The requirement is still being defined and must not be automated until the business rule is approved."
+    "allowed_trigger": "ClickUp webhook",
+    "blocked_triggers": [],
+    "reason": "The rule is enabled only for customer C00056 and blocks issuance if freight or emergency surcharge is missing, or another INT charge is present."
   },
   "split_strategy": {
     "basis": "ClickUp billable charge names resolved by the standard GT invoice mapping preview",
@@ -56,7 +53,7 @@
     "Blocks if an active replacement invoice exists with a total that does not match the expected split total.",
     "Reuses already-created active replacement invoices when rerun after a partial failure.",
     "Requires manual issue datetime override if FEL rejects cancellation because the SAT registered issue datetime differs from BC.",
-    "Does not add or expose a webhook/API endpoint for this flow."
+    "Runs through the standard invoice webhook only after both freight and emergency surcharge validate."
   ],
   "known_validation_case": {
     "shipment_task_id": "MTMLXGT-21971",

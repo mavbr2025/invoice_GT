@@ -769,6 +769,122 @@ def test_prepare_clickup_bc_sales_invoice_preview_uses_container_count_quantitie
     ]
 
 
+def test_prepare_clickup_bc_sales_invoice_preview_splits_alb_int_freight_and_emergency() -> None:
+    settings = InvoiceAutomationSettings(
+        **{
+            **make_settings().__dict__,
+            "int_split_customer_numbers": ("C00056",),
+            "charge_mappings": (
+                InvoiceChargeMapping(
+                    charge_name="Freight (Ocean/Truck/Air)",
+                    clickup_field_name="Freight (Ocean/Truck/Air)",
+                    clickup_field_id="field-freight",
+                    bc_item_number="INT000000026",
+                    bc_description="COORDINACION VIRTUAL DE TRANSPORTE MARITIMO",
+                    tax_group="NO IVA",
+                ),
+                InvoiceChargeMapping(
+                    charge_name="Emergency Surcharge",
+                    clickup_field_name="Emergency Surcharge",
+                    clickup_field_id="field-emergency",
+                    bc_item_number="INT000000032",
+                    bc_description="EMERGENCY SURCHARGE",
+                    tax_group="NO IVA",
+                ),
+                InvoiceChargeMapping(
+                    charge_name="Destination Charges",
+                    clickup_field_name="Destination Charges",
+                    clickup_field_id="field-destination",
+                    bc_item_number="NAT00000028",
+                    bc_description="DESTINATION CHARGES",
+                    tax_group="IVA 12",
+                ),
+            ),
+        }
+    )
+    summary = make_clickup_summary(status="Listo para facturar")
+    summary["custom_fields"]["Business Central Customer Number"] = {"value": "C00056"}
+    summary["custom_fields"]["Freight (Ocean/Truck/Air)"] = {
+        "id": "field-freight",
+        "value": "2600.00",
+    }
+    summary["custom_fields"]["Emergency Surcharge"] = {
+        "id": "field-emergency",
+        "value": "320.00",
+    }
+    summary["custom_fields"]["Destination Charges"] = {
+        "id": "field-destination",
+        "value": "800.00",
+    }
+
+    result = prepare_clickup_bc_sales_invoice_preview(
+        clickup_summary=summary,
+        bc_client=FakeBCInvoiceClient(),
+        settings=settings,
+        today=date(2026, 4, 8),
+    )
+
+    assert result["status"] == "dry_run_ready"
+    assert result["invoice_groups"] == ["INT", "INT-2", "NAT"]
+    assert [invoice["proposed_bc_payload"]["externalDocumentNumber"] for invoice in result["proposed_bc_invoices"]] == [
+        "PO-7788-INT",
+        "PO-7788-INT-2",
+        "PO-7788-NAT",
+    ]
+    assert [invoice["total"] for invoice in result["proposed_bc_invoices"]] == [2600.0, 320.0, 800.0]
+    assert result["customer_invoice_rule"]["id"] == "gt_alb_int_freight_emergency_split"
+    assert result["customer_split_validation"]["status"] == "passed"
+    assert result["invoice_validation"]["expected_totals_by_group"] == {
+        "INT": 2600.0,
+        "INT-2": 320.0,
+        "NAT": 800.0,
+    }
+
+
+def test_prepare_clickup_bc_sales_invoice_preview_blocks_incomplete_alb_int_split() -> None:
+    settings = InvoiceAutomationSettings(
+        **{
+            **make_settings().__dict__,
+            "int_split_customer_numbers": ("C00056",),
+            "charge_mappings": (
+                InvoiceChargeMapping(
+                    charge_name="Freight (Ocean/Truck/Air)",
+                    clickup_field_name="Freight (Ocean/Truck/Air)",
+                    clickup_field_id="field-freight",
+                    bc_item_number="INT000000026",
+                    bc_description="COORDINACION VIRTUAL DE TRANSPORTE MARITIMO",
+                    tax_group="NO IVA",
+                ),
+                InvoiceChargeMapping(
+                    charge_name="Emergency Surcharge",
+                    clickup_field_name="Emergency Surcharge",
+                    clickup_field_id="field-emergency",
+                    bc_item_number="INT000000032",
+                    bc_description="EMERGENCY SURCHARGE",
+                    tax_group="NO IVA",
+                ),
+            ),
+        }
+    )
+    summary = make_clickup_summary(status="Listo para facturar")
+    summary["custom_fields"]["Business Central Customer Number"] = {"value": "C00056"}
+    summary["custom_fields"]["Freight (Ocean/Truck/Air)"] = {
+        "id": "field-freight",
+        "value": "2600.00",
+    }
+    summary["custom_fields"].pop("Destination Charges")
+
+    result = prepare_clickup_bc_sales_invoice_preview(
+        clickup_summary=summary,
+        bc_client=FakeBCInvoiceClient(),
+        settings=settings,
+        today=date(2026, 4, 8),
+    )
+
+    assert result["status"] == "customer_int_split_validation_failed"
+    assert "Emergency Surcharge is required" in result["message"]
+
+
 def test_prepare_clickup_bc_sales_invoice_preview_rewrites_air_freight_description() -> None:
     settings = InvoiceAutomationSettings(
         **{

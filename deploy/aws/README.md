@@ -79,18 +79,14 @@ Customer-specific invoice exceptions are documented under:
 config/special_invoice_requirements/
 ```
 
-The current special request is `gt_int_two_step_special_request`: split the INT portion of an approved GT shipment into two manually issued INT invoices, one for `Freight (Ocean/Truck/Air)` and one for `Emergency Surcharge`.
+The active customer rule `gt_int_two_step_special_request` applies only to ALB
+Importaciones (`C00056`). The normal shipment webhook creates the following
+documents when eligible billable fields are present:
 
-This is intentionally not wired to the ClickUp webhook. Packaging `scripts/` into the image only preserves the controlled manual tooling for an operator with shell access; it does not expose a route, scheduler, or automatic trigger.
+- `<shipment>-INT`: `Freight (Ocean/Truck/Air)`.
+- `<shipment>-INT-2`: `Emergency Surcharge`.
+- `<shipment>-NAT`: unchanged, when NAT charges exist.
 
-Example manual command:
-
-```bash
-python scripts/replace_gt_invoice_split_int_charges_once.py \
-  --task-id MTMLXGT-21971 \
-  --team-id 8451352 \
-  --old-invoice GTFVR0003921 \
-  --issue-datetime 'GTFVR0003921=2026-06-12T01:25:19'
-```
-
-Do not automate this command until the requirement is promoted out of `manual_special_request_only`.
+The rule blocks the webhook before BC creation when either required INT charge
+is missing or a third INT charge would be assigned without an approved mapping.
+This prevents a partial or incorrectly bundled ALB INT invoice.

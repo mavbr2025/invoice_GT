@@ -83,6 +83,9 @@ class InvoiceAutomationSettings:
         "Agent's Reference",
         "MTM Booking",
     )
+    int_split_customer_numbers: tuple[str, ...] = ("C00056",)
+    int_split_freight_charge_names: tuple[str, ...] = ("Freight (Ocean/Truck/Air)",)
+    int_split_emergency_charge_names: tuple[str, ...] = ("Emergency Surcharge",)
 
     @classmethod
     def from_env(cls) -> "InvoiceAutomationSettings":
@@ -222,6 +225,18 @@ class InvoiceAutomationSettings:
             )
             if charge_mapping_path
             else True,
+            int_split_customer_numbers=_env_csv(
+                "CLICKUP_INVOICE_INT_SPLIT_CUSTOMER_NUMBERS",
+                default=("C00056",),
+            ),
+            int_split_freight_charge_names=_env_csv(
+                "CLICKUP_INVOICE_INT_SPLIT_FREIGHT_CHARGE_NAMES",
+                default=("Freight (Ocean/Truck/Air)",),
+            ),
+            int_split_emergency_charge_names=_env_csv(
+                "CLICKUP_INVOICE_INT_SPLIT_EMERGENCY_CHARGE_NAMES",
+                default=("Emergency Surcharge",),
+            ),
         )
 
 
@@ -657,6 +672,33 @@ def prepare_clickup_bc_sales_invoice_preview(
     if customer_number:
         header_payload["customerNumber"] = customer_number
 
+    customer_split_rule = _resolve_customer_int_split_rule(
+        customer_number=customer_number,
+        config=config,
+    )
+    customer_split_validation = _validate_customer_int_split_rule(
+        line_sources=line_sources,
+        customer_split_rule=customer_split_rule,
+    )
+    if customer_split_validation["status"] != "passed":
+        return {
+            "status": "customer_int_split_validation_failed",
+            "message": customer_split_validation["message"],
+            "market": market,
+            "currency": currency,
+            "task_status": task_status,
+            "reference": reference,
+            "customer_number": customer_number or None,
+            "customer_invoice_rule": customer_split_rule,
+            "customer_split_validation": customer_split_validation,
+            "line_sources": line_sources,
+        }
+    if customer_split_rule:
+        line_sources = _apply_customer_int_split_rule(
+            line_sources=line_sources,
+            customer_split_rule=customer_split_rule,
+        )
+
     proposed_invoices = _build_proposed_invoice_groups(
         header_payload=header_payload,
         line_payloads=line_payloads,
@@ -749,6 +791,8 @@ def prepare_clickup_bc_sales_invoice_preview(
         "customer_id": customer_id or None,
         "customer_number": customer_number or None,
         "customer_resolution": customer_resolution,
+        "customer_invoice_rule": customer_split_rule,
+        "customer_split_validation": customer_split_validation,
         "market_invoice_settings": market_invoice_settings,
         "shipment_metadata": shipment_metadata,
         "header_warnings": header_warnings,
@@ -1258,6 +1302,114 @@ def _build_proposed_invoice_groups(
     return proposed_invoices
 
 
+def _resolve_customer_int_split_rule(
+    *,
+    customer_number: str | None,
+    config: InvoiceAutomationSettings,
+) -> dict[str, Any] | None:
+    normalized_customer = str(customer_number or "").strip().upper()
+    eligible_customers = {
+        customer.strip().upper()
+        for customer in config.int_split_customer_numbers
+        if customer.strip()
+    }
+    if not normalized_customer or normalized_customer not in eligible_customers:
+        return None
+
+    return {
+        "id": "gt_alb_int_freight_emergency_split",
+        "customer_number": normalized_customer,
+        "freight_charge_names": tuple(config.int_split_freight_charge_names),
+        "emergency_charge_names": tuple(config.int_split_emergency_charge_names),
+        "invoice_groups": ("INT", "INT-2"),
+    }
+
+
+def _validate_customer_int_split_rule(
+    *,
+    line_sources: list[dict[str, Any]],
+    customer_split_rule: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if not customer_split_rule:
+        return {"status": "passed", "message": "No customer-specific INT split applies."}
+
+    freight_names = {
+        _normalize_charge_name(name)
+        for name in customer_split_rule["freight_charge_names"]
+    }
+    emergency_names = {
+        _normalize_charge_name(name)
+        for name in customer_split_rule["emergency_charge_names"]
+    }
+    int_sources = [
+        source
+        for source in line_sources
+        if str(source.get("invoice_group") or "").strip().upper() == "INT"
+    ]
+    if not int_sources:
+        return {
+            "status": "passed",
+            "message": "No INT charges are present, so the customer-specific split does not apply.",
+        }
+
+    freight_sources = [
+        source
+        for source in int_sources
+        if _normalize_charge_name(str(source.get("charge_name") or "")) in freight_names
+    ]
+    emergency_sources = [
+        source
+        for source in int_sources
+        if _normalize_charge_name(str(source.get("charge_name") or "")) in emergency_names
+    ]
+    unsupported_sources = [
+        source.get("charge_name") or "unnamed INT charge"
+        for source in int_sources
+        if _normalize_charge_name(str(source.get("charge_name") or "")) not in freight_names | emergency_names
+    ]
+    errors: list[str] = []
+    if not freight_sources:
+        errors.append("Freight (Ocean/Truck/Air) is required for the ALB INT split.")
+    if not emergency_sources:
+        errors.append("Emergency Surcharge is required for the ALB INT split.")
+    if unsupported_sources:
+        errors.append(
+            "The ALB INT split only supports freight and emergency surcharge; "
+            f"additional INT charges found: {', '.join(map(str, unsupported_sources))}."
+        )
+    if errors:
+        return {"status": "failed", "message": " ".join(errors), "errors": errors}
+    return {
+        "status": "passed",
+        "message": "ALB INT freight and emergency surcharge will be issued separately.",
+        "freight_total": _sum_source_amounts(freight_sources),
+        "emergency_total": _sum_source_amounts(emergency_sources),
+    }
+
+
+def _apply_customer_int_split_rule(
+    *,
+    line_sources: list[dict[str, Any]],
+    customer_split_rule: dict[str, Any],
+) -> list[dict[str, Any]]:
+    freight_names = {
+        _normalize_charge_name(name)
+        for name in customer_split_rule["freight_charge_names"]
+    }
+    rewritten_sources: list[dict[str, Any]] = []
+    for source in line_sources:
+        rewritten = dict(source)
+        if str(rewritten.get("invoice_group") or "").strip().upper() == "INT":
+            charge_name = _normalize_charge_name(str(rewritten.get("charge_name") or ""))
+            rewritten["invoice_group"] = "INT" if charge_name in freight_names else "INT-2"
+        rewritten_sources.append(rewritten)
+    return rewritten_sources
+
+
+def _normalize_charge_name(value: str) -> str:
+    return " ".join(value.strip().casefold().split())
+
+
 def _invoice_group_from_item_number(item_number: str) -> str:
     normalized = (item_number or "").strip().upper()
     if normalized.startswith("INT"):
@@ -1278,7 +1430,7 @@ def _invoice_group_reference(reference: str, group: str) -> str:
 
 
 def _invoice_group_sort_key(group: str) -> tuple[int, str]:
-    priority = {"INT": 0, "NAT": 1, "OTHER": 2, "ACCOUNT": 3}
+    priority = {"INT": 0, "INT-2": 1, "NAT": 2, "OTHER": 3, "ACCOUNT": 4}
     normalized = (group or "").strip().upper()
     return priority.get(normalized, 9), normalized
 

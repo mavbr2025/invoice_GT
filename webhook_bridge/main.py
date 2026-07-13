@@ -696,7 +696,15 @@ async def clickup_invoice_deliver_posted(
                 )
 
             reference = str(posted_invoice.get("externalDocumentNumber") or "").upper()
-            invoice_group = "INT" if "-INT" in reference else "NAT" if "-NAT" in reference else "ALL"
+            invoice_group = (
+                "INT-2"
+                if "-INT-2" in reference
+                else "INT"
+                if "-INT" in reference
+                else "NAT"
+                if "-NAT" in reference
+                else "ALL"
+            )
             finalized_invoices.append(
                 {
                     "invoice_group": invoice_group,
