@@ -76,6 +76,10 @@ def main() -> None:
     settings = InvoiceAutomationSettings.from_env()
     market = settings.supported_market
     issue_datetime_overrides = _parse_issue_datetime_overrides(args.issue_datetime)
+    old_invoice = bc.get_posted_sales_invoice_by_number(args.old_invoice, market=market)
+    if not old_invoice:
+        raise ValueError(f"Business Central posted invoice was not found: {args.old_invoice}.")
+    old_invoice_reference = str(old_invoice.get("externalDocumentNumber") or "").strip()
 
     task = clickup.get_task(
         args.task_id,
@@ -179,12 +183,19 @@ def main() -> None:
             )
         )
 
-    # Pass only the new invoices to the delivery helper and no existing attachment ids.
-    # This intentionally replaces the ClickUp file field contents with the two active PDFs.
+    # Retain active documents, including the NAT invoice, while removing only the
+    # cancelled INT document before the two replacement PDFs are appended.
     delivery = finalize_clickup_issued_invoices(
         clickup=clickup,
         bc_client=bc,
-        clickup_summary={**summary, "custom_fields": _clear_invoice_file_field(summary.get("custom_fields") or {})},
+        clickup_summary={
+            **summary,
+            "custom_fields": _retain_non_replaced_invoice_attachments(
+                summary.get("custom_fields") or {},
+                replaced_invoice_number=args.old_invoice,
+                replaced_external_reference=old_invoice_reference,
+            ),
+        },
         invoice_result=invoice_result,
         settings=settings,
         workspace_id=args.team_id,
@@ -704,14 +715,34 @@ def _active_replacement_duplicates(
     return duplicates
 
 
-def _clear_invoice_file_field(custom_fields: dict[str, Any]) -> dict[str, Any]:
-    cleared = dict(custom_fields)
-    for key, field in list(cleared.items()):
+def _retain_non_replaced_invoice_attachments(
+    custom_fields: dict[str, Any],
+    *,
+    replaced_invoice_number: str,
+    replaced_external_reference: str,
+) -> dict[str, Any]:
+    retained_fields = dict(custom_fields)
+    replaced_names = {
+        f"{value.strip()}.pdf".casefold()
+        for value in (replaced_invoice_number, replaced_external_reference)
+        if str(value or "").strip()
+    }
+    for key, field in list(retained_fields.items()):
         if isinstance(field, dict) and field.get("id") == "5d67859a-1ae0-4cda-9f57-2a89bf1ff259":
             field = dict(field)
-            field["value"] = []
-            cleared[key] = field
-    return cleared
+            attachments = field.get("value")
+            if not isinstance(attachments, list):
+                attachments = []
+            field["value"] = [
+                attachment
+                for attachment in attachments
+                if not (
+                    isinstance(attachment, dict)
+                    and str(attachment.get("title") or "").strip().casefold() in replaced_names
+                )
+            ]
+            retained_fields[key] = field
+    return retained_fields
 
 
 def _sum_line_amounts(line_payloads: list[dict[str, Any]]) -> float:

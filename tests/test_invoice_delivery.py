@@ -28,6 +28,7 @@ class FakeClickUp:
         self.settings = SimpleNamespace(default_workspace_id="8451352")
         self.uploads: list[dict[str, object]] = []
         self.file_field_updates: list[dict[str, object]] = []
+        self.file_field_clears: list[dict[str, object]] = []
         self.comments: list[dict[str, object]] = []
         self.field_updates: list[dict[str, object]] = []
 
@@ -54,6 +55,11 @@ class FakeClickUp:
         update = {"task_id": task_id, "field_id": field_id, "attachment_ids": attachment_ids}
         self.file_field_updates.append(update)
         return update
+
+    def clear_task_custom_field_value(self, task_id, field_id):
+        clear = {"task_id": task_id, "field_id": field_id}
+        self.file_field_clears.append(clear)
+        return clear
 
     def create_task_comment(self, task_id, *, comment_text, notify_all=False):
         comment = {"task_id": task_id, "comment_text": comment_text, "notify_all": notify_all}
@@ -196,6 +202,9 @@ def test_finalize_clickup_issued_invoices_accepts_finalized_stamped_invoice_resu
             "field_id": "5d67859a-1ae0-4cda-9f57-2a89bf1ff259",
             "attachment_ids": ["attachment-1", "attachment-2"],
         }
+    ]
+    assert clickup.file_field_clears == [
+        {"task_id": "task-1", "field_id": "5d67859a-1ae0-4cda-9f57-2a89bf1ff259"}
     ]
     assert "GTFVR0003923" in result["comment_text"]
     assert "GTFVR0003924" in result["comment_text"]

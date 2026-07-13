@@ -300,11 +300,27 @@ def _upload_invoice_pdfs_to_clickup_field(
         )
 
     combined_attachment_ids = [*existing_attachment_ids, *new_attachment_ids]
-    pdf_field_update = clickup.set_task_file_custom_field_attachments(
-        task_id,
-        field_id,
-        combined_attachment_ids,
-    )
+    # A Files custom field appends values when set. Clear it first so a
+    # reissue replaces the cancelled PDF instead of leaving a stale document.
+    clickup.clear_task_custom_field_value(task_id, field_id)
+    try:
+        pdf_field_update = clickup.set_task_file_custom_field_attachments(
+            task_id,
+            field_id,
+            combined_attachment_ids,
+        )
+    except Exception:
+        # Preserve the prior active documents if ClickUp fails after the clear.
+        if existing_attachment_ids:
+            try:
+                clickup.set_task_file_custom_field_attachments(
+                    task_id,
+                    field_id,
+                    existing_attachment_ids,
+                )
+            except Exception:  # pragma: no cover - surface the original failure
+                logger.exception("Could not restore ClickUp Invoice to Client attachments.")
+        raise
     return uploaded_documents, pdf_field_update
 
 

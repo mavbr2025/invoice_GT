@@ -245,6 +245,7 @@ class _FakeInvoiceClickUpClient:
         self.comments: list[dict[str, object]] = []
         self.custom_field_uploads: list[dict[str, object]] = []
         self.file_field_updates: list[dict[str, object]] = []
+        self.file_field_clears: list[dict[str, object]] = []
 
     def get_authorized_workspaces(self) -> dict[str, object]:
         return {"teams": [{"id": "8451352"}]}
@@ -309,6 +310,11 @@ class _FakeInvoiceClickUpClient:
         update = {"task_id": task_id, "field_id": field_id, "attachment_ids": attachment_ids}
         self.file_field_updates.append(update)
         return update
+
+    def clear_task_custom_field_value(self, task_id: str, field_id: str) -> dict[str, object]:
+        clear = {"task_id": task_id, "field_id": field_id}
+        self.file_field_clears.append(clear)
+        return clear
 
     def create_task_comment(self, task_id: str, *, comment_text: str, notify_all: bool = False) -> dict[str, object]:
         comment = {"task_id": task_id, "comment_text": comment_text, "notify_all": notify_all}

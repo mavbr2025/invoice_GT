@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import mimetypes
+import time
 from pathlib import Path
 from typing import Any
 
@@ -189,6 +190,17 @@ class ClickUpClient:
             json=payload,
         )
 
+    def clear_task_custom_field_value(
+        self,
+        task_id: str,
+        field_id: str,
+    ) -> dict[str, Any]:
+        """Remove the current value before replacing a ClickUp Files field."""
+        return self._request(
+            "DELETE",
+            f"https://api.clickup.com/api/v2/task/{task_id}/field/{field_id}",
+        )
+
     def upload_custom_field_attachment(
         self,
         workspace_id: str,
@@ -207,14 +219,24 @@ class ClickUpClient:
             **self._authorization_headers(),
             "Accept": "application/json",
         }
-        with path.open("rb") as handle:
-            response = requests.post(
-                f"https://api.clickup.com/api/v3/workspaces/{workspace_id}/custom_fields/{field_id}/attachments",
-                headers=headers,
-                files={"attachment": (upload_name, handle, upload_mime_type)},
-                data={"filename": upload_name},
-                timeout=120,
-            )
+        retryable_statuses = {429, 500, 502, 503, 504}
+        response: requests.Response | None = None
+        for attempt in range(1, 4):
+            with path.open("rb") as handle:
+                response = requests.post(
+                    f"https://api.clickup.com/api/v3/workspaces/{workspace_id}/custom_fields/{field_id}/attachments",
+                    headers=headers,
+                    files={"attachment": (upload_name, handle, upload_mime_type)},
+                    timeout=120,
+                )
+            if response.status_code not in retryable_statuses:
+                response.raise_for_status()
+                return response.json()
+            if attempt < 3:
+                time.sleep(float(attempt))
+
+        if response is None:  # pragma: no cover - defensive guard for requests behavior
+            raise RuntimeError(f"ClickUp did not return a response while uploading {upload_name}.")
         response.raise_for_status()
         return response.json()
 
