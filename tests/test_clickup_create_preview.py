@@ -130,3 +130,29 @@ def test_prepare_clickup_bc_customer_create_preview_rejects_non_current_customer
         bc_client=FakeBCClient(),
     )
     assert preview["status"] == "not_current_customer"
+
+
+def test_prepare_clickup_bc_customer_create_preview_blocks_missing_required_fields() -> None:
+    preview = prepare_clickup_bc_customer_create_preview(
+        clickup_summary={
+            "task_id": "task-incomplete",
+            "custom_id": "MTM-2040546",
+            "name": "TEXTILES PARIS",
+            "status": "current customer",
+            "market": "GT",
+            "custom_fields": {
+                "Tax ID": {"value": "27375145"},
+                "Contact Phone 1": {"value": "+502 22211083"},
+            },
+        },
+        current_match_result={"status": "no_match", "candidates": []},
+        bc_client=FakeBCClient(),
+    )
+
+    assert preview["status"] == "missing_required_fields"
+    assert preview["missing_required_fields"] == [
+        "Business Central Legal Name",
+        "Contact E-mail 1 or Contact Email 1",
+        "Customer Address",
+        "Credit Terms or Credit Days Required",
+    ]

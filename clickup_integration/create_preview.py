@@ -112,6 +112,35 @@ def prepare_clickup_bc_customer_create_preview(
     address_line1, address_line2 = split_bc_address_lines(address)
     credit_terms_label = resolve_clickup_credit_terms(custom_fields)
     credit_approved = resolve_clickup_credit_approved(custom_fields)
+
+    missing_required_fields: list[str] = []
+    if not legal_name:
+        missing_required_fields.append("Business Central Legal Name")
+    if not tax_id:
+        missing_required_fields.append("Customer Tax ID or Tax ID")
+    if not email:
+        missing_required_fields.append("Contact E-mail 1 or Contact Email 1")
+    if not phone:
+        missing_required_fields.append("Contact Phone 1")
+    if not address:
+        missing_required_fields.append("Customer Address")
+    if not credit_terms_label:
+        missing_required_fields.append("Credit Terms or Credit Days Required")
+
+    if missing_required_fields:
+        return {
+            "status": "missing_required_fields",
+            "message": (
+                "ClickUp customer is not ready for Business Central creation. "
+                "Complete the required fields before retrying the customer sync."
+            ),
+            "task_status": task_status,
+            "market": market,
+            "task_id": clickup_summary.get("task_id"),
+            "custom_id": clickup_summary.get("custom_id"),
+            "missing_required_fields": missing_required_fields,
+        }
+
     company = bc_client.get_company_metadata(market=market)
     company_name = (company or {}).get("name") or (company or {}).get("displayName")
     payment_term = (
