@@ -1,0 +1,182 @@
+CLICKUP TO BUSINESS CENTRAL CUSTOMER SETUP
+
+PURPOSE
+
+Use this process when a qualified ClickUp customer is ready to become a Business Central customer.
+
+The customer record is sent to Business Central only when the ClickUp task changes to CURRENT CUSTOMER. Complete and verify every required field before changing the status.
+
+
+TEAM PROCESS
+
+1. Keep the task in its current pre-customer status while collecting the customer data.
+2. Complete all seven required data points listed below.
+3. Complete the approved credit amount when the customer has credit terms.
+4. Review the legal name, tax ID, country, and credit information against the customer's official documentation.
+5. Only after the record passes the checklist, change the task status to CURRENT CUSTOMER.
+6. Wait for the AWS automation to process the task.
+7. Confirm that the four system-managed Business Central fields were populated.
+8. If confirmation does not appear, do not create the customer manually and do not clear any BC identifiers. Follow the exception process below.
+
+
+REQUIRED TEAM-ENTERED CLICKUP FIELDS
+
+1. Owner Country/
+
+Select exactly Guatemala or Mexico.
+
+This routes the customer to the correct Business Central company:
+
+- Guatemala becomes GT.
+- Mexico becomes MX.
+
+Any other or blank value blocks the sync.
+
+2. Business Central Legal Name
+
+Enter the customer's official invoicing/legal name, preferably in uppercase.
+
+This becomes the BC customer display name and invoicing legal name. Do not enter only a commercial nickname.
+
+3. Customer Tax ID
+
+Enter the official tax number, preferably using digits only.
+
+This is the primary tax field and the strongest duplicate-control value. If Customer Tax ID is unavailable or blank, Tax ID is accepted as the fallback. Never enter different values in the two fields.
+
+4. Contact E-mail 1
+
+Enter the primary email that should receive customer invoices.
+
+If that exact field is unavailable, Contact Email 1 is accepted. The integration can technically fall back to Operations Email, Sales email, or Finance email, but the team should use the primary contact field to avoid ambiguity.
+
+5. Contact Phone 1
+
+Enter the primary customer telephone, including the country code.
+
+A secondary phone can technically be used as a fallback, but the primary field should always be completed.
+
+6. Customer Address
+
+Enter the complete, usable customer address in the mapped/location field.
+
+This becomes the BC customer address. Do not enter a partial or invented address.
+
+7. Credit Days Required
+
+Enter 0 for cash/immediate payment, or enter the approved number of credit days.
+
+- 0 becomes BC payment terms CONTADO and payment method CONTADO.
+- A positive number becomes <number> DÍAS and payment method CREDITO.
+- The corresponding payment term must already exist in the applicable BC company.
+- If the ClickUp list uses Credit Terms instead, that field is accepted.
+
+All seven required data points must be present before the task moves to CURRENT CUSTOMER.
+
+
+CONDITIONAL AND RECOMMENDED FIELDS
+
+Credit amount approved / Credit Approved
+
+Required by the business process whenever the customer receives credit. Enter a numeric amount only. Use 0 for no approved credit limit when appropriate. This value sets the BC credit limit.
+
+Contact Name 1
+
+Complete whenever a primary contact is known. It is written to the BC invoicing record.
+
+Webpage
+
+Complete when the customer has an official website. It is written to BC and helps the duplicate matcher.
+
+Clientes/
+
+Select the correct customer reference when available. It helps customer matching and traceability, but it does not replace Business Central Legal Name.
+
+The customer Needs credit?
+
+Maintain this for the team's commercial workflow if used. It is informational only and does not control BC payment terms or the credit limit. Credit Days Required and the approved amount fields control the integration.
+
+
+AUTOMATION FLOW
+
+1. Customer remains in a pre-customer status.
+2. Team completes and validates all required ClickUp fields.
+3. Team changes the status to CURRENT CUSTOMER.
+4. ClickUp sends an authenticated webhook to AWS.
+5. AWS checks Business Central for an existing customer.
+6. The integration then performs one of the following actions:
+   - Updates the already linked and confirmed BC customer.
+   - Links a safe existing BC match.
+   - Creates a new BC customer when no match exists.
+   - Blocks processing when data is invalid or duplicate risk requires review.
+7. After a successful link, update, or creation, AWS writes the BC identifiers and Confirmed status back to ClickUp.
+8. The team verifies the successful writeback.
+
+
+SYSTEM-MANAGED CLICKUP FIELDS
+
+The AWS integration populates the following fields. Team members must not type into, replace, or clear them:
+
+- Business Central Customer Number
+- Business Central Customer ID
+- Business Central Customer Link
+- BC Match Status
+
+A customer is fully synchronized only when the BC customer number, ID, link, and BC Match Status = Confirmed are present.
+
+Business Central Legal Name is different. The team must complete it before the first sync, and the integration writes the confirmed BC display name back into the same field. If the legal name later changes officially, correct this source field and use the exception/retry process so BC is updated safely.
+
+
+PRE-TRIGGER CHECKLIST
+
+Before changing the status, confirm every item:
+
+[ ] Owner Country/ is Guatemala or Mexico.
+[ ] Business Central Legal Name matches official tax/invoicing documentation.
+[ ] Customer Tax ID or fallback Tax ID is correct and contains the same tax identity used in BC.
+[ ] A valid primary customer email is present.
+[ ] A valid primary customer phone is present.
+[ ] Customer Address is complete.
+[ ] Credit Days Required or Credit Terms is present and approved.
+[ ] If credit applies, the approved numeric credit amount is present.
+[ ] The system-managed BC fields have not been manually populated with guessed values.
+[ ] The task is ready to be changed to CURRENT CUSTOMER only once.
+
+
+CREDIT EXAMPLES
+
+ClickUp value: 0 or CONTADO
+BC payment terms: CONTADO / immediate payment
+BC payment method: CONTADO
+
+ClickUp value: 7
+BC payment terms: 7 DÍAS
+BC payment method: CREDITO
+
+ClickUp value: 15
+BC payment terms: 15 DÍAS
+BC payment method: CREDITO
+
+ClickUp value: 30
+BC payment terms: 30 DÍAS
+BC payment method: CREDITO
+
+Use only terms approved by Finance and configured in the applicable BC company.
+
+
+EXCEPTION AND RETRY PROCESS
+
+If the task is already CURRENT CUSTOMER and the required fields are later corrected, editing the fields alone does not retrigger the status-change automation.
+
+1. Do not clear Business Central Customer Number, Business Central Customer ID, Business Central Customer Link, or BC Match Status.
+2. Do not create the customer manually in BC. This can produce duplicates.
+3. Capture the ClickUp task link and list the fields that were corrected.
+4. Ask the integration owner to replay the AWS customer sync for that task.
+5. After replay, verify the four system-managed fields and open the BC link to confirm the record.
+
+If the integration reports a possible duplicate or writes a status other than Confirmed, stop and have the integration owner compare the ClickUp tax ID and legal name against the candidate BC customer before retrying.
+
+
+SHORT TEAM INSTRUCTION
+
+Complete Owner Country/, Business Central Legal Name, Customer Tax ID, Contact E-mail 1, Contact Phone 1, Customer Address, and Credit Days Required before changing the task to CURRENT CUSTOMER. If credit applies, also enter the approved credit amount. After the status change, confirm that the BC customer number, ID, link, and BC Match Status = Confirmed were written back. Never manually edit or clear the BC system fields.
