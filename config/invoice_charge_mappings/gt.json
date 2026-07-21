@@ -49,6 +49,14 @@
       "tax_group": "NO IVA"
     },
     {
+      "charge_name": "VGM",
+      "clickup_field_id": "6c946b7c-0f08-4d3b-bf89-c739e0712b46",
+      "clickup_field_name": "VGM",
+      "bc_item_number": "INT000000024",
+      "bc_description": "VERIFIED GROSS MASS",
+      "tax_group": "NO IVA"
+    },
+    {
       "charge_name": "Food Grade Container",
       "clickup_field_id": "47789ded-d701-41d0-9141-a9153a6080b0",
       "clickup_field_name": "Food Grade Container",

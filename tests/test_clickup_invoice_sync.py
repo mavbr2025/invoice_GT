@@ -1,4 +1,5 @@
 from datetime import date
+from pathlib import Path
 from types import SimpleNamespace
 
 from clickup_integration.invoice_sync import (
@@ -6,6 +7,7 @@ from clickup_integration.invoice_sync import (
     InvoiceAutomationSettings,
     apply_clickup_bc_sales_invoice,
     issue_clickup_bc_sales_invoice,
+    load_invoice_charge_mappings,
     prepare_clickup_bc_sales_invoice_preview,
     prepare_clickup_invoice_status_transition,
 )
@@ -694,6 +696,21 @@ def test_prepare_clickup_bc_sales_invoice_preview_uses_charge_mapping_items() ->
     assert result["proposed_bc_line_payloads"][0]["itemId"] == "item-INT000000026"
     assert result["proposed_bc_line_payloads"][1]["lineObjectNumber"] == "NAT00000028"
     assert result["line_sources"][0]["source_field_id"] == "field-freight"
+
+
+def test_gt_charge_mapping_includes_vgm_as_no_iva_int_item() -> None:
+    mappings = load_invoice_charge_mappings(
+        Path(__file__).parents[1] / "config" / "invoice_charge_mappings" / "gt.json"
+    )
+
+    vgm = next(mapping for mapping in mappings if mapping.clickup_field_id == "6c946b7c-0f08-4d3b-bf89-c739e0712b46")
+
+    assert vgm.charge_name == "VGM"
+    assert vgm.clickup_field_name == "VGM"
+    assert vgm.bc_item_number == "INT000000024"
+    assert vgm.bc_description == "VERIFIED GROSS MASS"
+    assert vgm.tax_group == "NO IVA"
+    assert vgm.quantity_basis == "shipment"
 
 
 def test_prepare_clickup_bc_sales_invoice_preview_uses_container_count_quantities() -> None:
