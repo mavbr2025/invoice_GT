@@ -110,7 +110,10 @@ def match_clickup_customer_to_bc(
     candidates.sort(key=lambda item: item["score"], reverse=True)
     top_candidates = candidates[:top_n]
 
-    if normalized_clickup_tax_id and (not top_candidates or top_candidates[0]["score"] < 0.85):
+    # A supplied Tax ID is authoritative. Name, email, or website similarity must
+    # never override a different Tax ID because common legal suffixes such as
+    # "SOCIEDAD ANONIMA" can otherwise produce unsafe false-positive matches.
+    if normalized_clickup_tax_id:
         return {
             "status": "no_match",
             "market": market,
@@ -151,4 +154,3 @@ def _norm(value: str) -> str:
     value = value.lower()
     value = re.sub(r"[^a-z0-9]+", " ", value)
     return " ".join(value.split())
-

@@ -82,3 +82,37 @@ def test_matcher_tax_id_guard_prevents_weak_fuzzy_duplicate() -> None:
     assert result["status"] == "no_match"
     assert result["match_basis"] == "tax_id_guard_no_exact_match"
     assert result["candidates"][0]["number"] == "C00007"
+
+
+def test_matcher_tax_id_guard_prevents_high_name_similarity_with_different_tax_id() -> None:
+    clickup_summary = {
+        "status": "current customer",
+        "market": "GT",
+        "name": "ANIS, Sociedad Anonima",
+        "custom_fields": {
+            "Customer Tax ID": {"value": "103001093"},
+            "Webpage": {"value": None},
+        },
+    }
+    bc = FakeBCClient(
+        [
+            {
+                "id": "bc-antique",
+                "number": "C00070",
+                "displayName": "ANTIQUE SOCIEDAD ANONIMA",
+                "email": "",
+                "website": "",
+                "country": "GT",
+                "currencyCode": "GTQ",
+                "taxRegistrationNumber": "44368461",
+            }
+        ]
+    )
+
+    result = match_clickup_customer_to_bc(clickup_summary=clickup_summary, bc_client=bc)
+
+    assert result["status"] == "no_match"
+    assert result["match_basis"] == "tax_id_guard_no_exact_match"
+    assert result["tax_id"] == "103001093"
+    assert result["candidates"][0]["number"] == "C00070"
+    assert result["candidates"][0]["score"] >= 0.85
