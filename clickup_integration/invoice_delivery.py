@@ -49,6 +49,72 @@ def should_validate_invoice_pdf_layout() -> bool:
     return raw_value not in {"0", "false", "no", "off"}
 
 
+def should_send_invoice_customer_email() -> bool:
+    """Keep native BC customer delivery explicitly opt-in during rollout."""
+    raw_value = os.getenv("CLICKUP_INVOICE_SEND_ENABLED", "false").strip().lower()
+    return raw_value in {"1", "true", "yes", "on"}
+
+
+def send_issued_invoice_customer_emails(
+    *,
+    bc_client: BusinessCentralClient,
+    invoice_result: dict[str, Any],
+    settings: InvoiceAutomationSettings,
+) -> dict[str, Any]:
+    """Validate the BC PDF, then submit each FEL-stamped invoice through BC Email."""
+    created_invoices = delivery_invoices_from_result(invoice_result)
+    market = _resolve_delivery_market(invoice_result, settings=settings)
+    finalized_by_number = {
+        str((finalized.get("posted_invoice_after_stamp") or {}).get("number") or "").strip(): finalized
+        for finalized in invoice_result.get("finalized_invoices") or []
+        if isinstance(finalized, dict)
+    }
+    deliveries: list[dict[str, Any]] = []
+
+    for invoice in created_invoices:
+        invoice_id = str(invoice.get("id") or "").strip()
+        invoice_number = str(invoice.get("number") or "").strip()
+        if not invoice_id or not invoice_number:
+            raise ValueError("Invoice email requires a posted Business Central invoice id and number.")
+        finalized = finalized_by_number.get(invoice_number) or {}
+        fel_row = finalized.get("custom_api_row_after_stamp") or {}
+        fel_row_id = str(fel_row.get("id") or "").strip()
+        if not fel_row_id:
+            fel_row = bc_client.get_posted_invoice_fel_description_by_number(invoice_number, market=market) or {}
+            fel_row_id = str(fel_row.get("id") or "").strip()
+        if not fel_row_id:
+            raise ValueError(f"Business Central FEL API row was not found for invoice {invoice_number}.")
+
+        pdf_content = _download_invoice_pdf_with_retry(
+            bc_client=bc_client,
+            invoice_id=invoice_id,
+            market=market,
+        )
+        validate_invoice_pdf_layout(
+            pdf_content,
+            invoice_number=invoice_number,
+            invoice_group=str(invoice.get("invoice_group") or ""),
+            market=market,
+        )
+        bc_client.send_posted_invoice_customer_email(fel_row_id, market=market)
+        audit = bc_client.get_invoice_email_delivery_by_posted_invoice_id(invoice_id, market=market)
+        audit_status = str((audit or {}).get("status") or "").strip().lower()
+        if audit_status != "sent":
+            raise ValueError(
+                f"Business Central did not confirm customer email submission for {invoice_number}. "
+                f"Audit status: {audit_status or 'missing'}. "
+                f"Detail: {(audit or {}).get('errorText') or 'none'}."
+            )
+        deliveries.append({"invoice_number": invoice_number, "invoice_id": invoice_id, "audit": audit})
+
+    return {
+        "status": "sent",
+        "sender": "consuelo@mtmlogix.com",
+        "delivery_provider": "business_central_email_scenario",
+        "deliveries": deliveries,
+    }
+
+
 def validate_invoice_pdf_field_on_task(
     clickup_summary: dict[str, Any],
     *,

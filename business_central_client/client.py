@@ -884,6 +884,43 @@ class BusinessCentralClient:
             market=market,
         )
 
+    def send_posted_invoice_customer_email(
+        self,
+        posted_invoice_fel_row_id: str,
+        *,
+        company_id: str | None = None,
+        market: str | None = None,
+    ) -> dict[str, Any]:
+        """Submit the approved MTM PDF through BC's configured email scenario."""
+        return self._post_posted_invoice_fel_action(
+            posted_invoice_fel_row_id,
+            "SendApprovedInvoiceEmail",
+            company_id=company_id,
+            market=market,
+        )
+
+    def get_invoice_email_delivery_by_posted_invoice_id(
+        self,
+        posted_invoice_id: str,
+        *,
+        company_id: str | None = None,
+        market: str | None = None,
+    ) -> dict[str, Any] | None:
+        needle = (posted_invoice_id or "").strip()
+        if not needle:
+            return None
+        rows = self._get_invoice_email_deliveries(
+            filters=f"postedInvoiceId eq {needle}",
+            top=2,
+            company_id=company_id,
+            market=market,
+        )
+        if not rows:
+            return None
+        if len(rows) > 1:
+            raise ValueError(f"More than one Business Central email audit row matched {posted_invoice_id}.")
+        return rows[0]
+
     def stamp_posted_credit_memo_fel(
         self,
         posted_credit_memo_fel_row_id: str,
@@ -989,6 +1026,30 @@ class BusinessCentralClient:
         url = (
             f"https://api.businesscentral.dynamics.com/v2.0/{self.settings.environment}"
             f"/api/mtmlogix/invoiceSync/v1.0/companies({company})/postedInvoiceFelDescriptions"
+        )
+        return self._request(
+            "GET",
+            url,
+            params={"$top": top, "$filter": filters},
+        ).get("value", [])
+
+    def _get_invoice_email_deliveries(
+        self,
+        *,
+        filters: str,
+        top: int = 1,
+        company_id: str | None = None,
+        market: str | None = None,
+    ) -> list[dict[str, Any]]:
+        company = self._resolve_company_id(company_id=company_id, market=market)
+        if not company:
+            raise ValueError(
+                "A company ID is required. Set BC_COMPANY_ID, configure BC_MARKET_<CODE>_COMPANY_ID, "
+                "or pass company_id explicitly."
+            )
+        url = (
+            f"https://api.businesscentral.dynamics.com/v2.0/{self.settings.environment}"
+            f"/api/mtmlogix/invoiceSync/v1.0/companies({company})/invoiceEmailDeliveries"
         )
         return self._request(
             "GET",

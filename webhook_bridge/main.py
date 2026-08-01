@@ -16,6 +16,8 @@ from clickup_integration.config import ClickUpSettings
 from clickup_integration.create_preview import apply_clickup_bc_customer_create
 from clickup_integration.invoice_delivery import (
     finalize_clickup_issued_invoices,
+    send_issued_invoice_customer_emails,
+    should_send_invoice_customer_email,
     validate_invoice_pdf_field_on_task,
 )
 from clickup_integration.invoice_sync import (
@@ -64,6 +66,7 @@ def invoice_sync_readiness() -> dict[str, Any]:
         "market": settings.supported_market,
         "currency": settings.supported_currency,
         "apply_mode": _env_bool("CLICKUP_INVOICE_WEBHOOK_APPLY", default=False),
+        "customer_email_enabled": should_send_invoice_customer_email(),
         "ready_status": settings.ready_status,
         "ok_finops_status": settings.ok_finops_status,
         "charge_mapping_count": len(settings.charge_mappings),
@@ -460,44 +463,82 @@ async def clickup_invoice_sync(
                 )
                 actions.extend(invoice_result.get("completed_stages") or ["create_sales_invoice"])
                 if invoice_result.get("status") == "applied":
-                    try:
-                        delivery_result = finalize_clickup_issued_invoices(
-                            clickup=clickup,
-                            bc_client=bc,
-                            clickup_summary=summary,
-                            invoice_result=invoice_result,
-                            settings=settings,
-                            workspace_id=team_id,
-                            mark_status=True,
-                        )
-                    except Exception as exc:
-                        logger.exception(
-                            "ClickUp invoice delivery failed after BC invoice creation task_id=%s",
-                            summary.get("task_id"),
-                        )
-                        invoice_result = {
-                            **invoice_result,
-                            "status": "failed_post_creation",
-                            "message": str(exc),
-                        }
-                        error_comment = _write_invoice_error_comment(
-                            clickup=clickup,
-                            clickup_summary=summary,
-                            stage="entrega_clickup",
-                            invoice_result=invoice_result,
-                        )
-                        if error_comment:
-                            invoice_result = {**invoice_result, "error_comment": error_comment}
-                            actions.append("comment_invoice_error")
+                    if should_send_invoice_customer_email():
+                        try:
+                            customer_email_delivery = send_issued_invoice_customer_emails(
+                                bc_client=bc,
+                                invoice_result=invoice_result,
+                                settings=settings,
+                            )
+                        except Exception as exc:
+                            logger.exception(
+                                "Business Central customer email failed after invoice creation task_id=%s",
+                                summary.get("task_id"),
+                            )
+                            invoice_result = {
+                                **invoice_result,
+                                "status": "failed_post_creation",
+                                "failed_stage": "envio_cliente",
+                                "message": str(exc),
+                            }
+                            error_comment = _write_invoice_error_comment(
+                                clickup=clickup,
+                                clickup_summary=summary,
+                                stage="envio_cliente",
+                                invoice_result=invoice_result,
+                            )
+                            if error_comment:
+                                invoice_result = {**invoice_result, "error_comment": error_comment}
+                                actions.append("comment_invoice_error")
+                        else:
+                            invoice_result = {
+                                **invoice_result,
+                                "customer_email_delivery": customer_email_delivery,
+                            }
+                            actions.append("send_customer_email_from_bc")
+
+                    if invoice_result.get("status") != "applied":
+                        pass
                     else:
-                        invoice_result = {
-                            **invoice_result,
-                            "delivery": delivery_result,
-                            "final_status_update": delivery_result.get("final_status_update"),
-                        }
-                        actions.append("upload_invoice_pdfs")
-                        actions.append("comment_invoice_details")
-                        actions.append("set_facturada_status")
+                        try:
+                            delivery_result = finalize_clickup_issued_invoices(
+                                clickup=clickup,
+                                bc_client=bc,
+                                clickup_summary=summary,
+                                invoice_result=invoice_result,
+                                settings=settings,
+                                workspace_id=team_id,
+                                mark_status=True,
+                            )
+                        except Exception as exc:
+                            logger.exception(
+                                "ClickUp invoice delivery failed after BC invoice creation task_id=%s",
+                                summary.get("task_id"),
+                            )
+                            invoice_result = {
+                                **invoice_result,
+                                "status": "failed_post_creation",
+                                "failed_stage": "entrega_clickup",
+                                "message": str(exc),
+                            }
+                            error_comment = _write_invoice_error_comment(
+                                clickup=clickup,
+                                clickup_summary=summary,
+                                stage="entrega_clickup",
+                                invoice_result=invoice_result,
+                            )
+                            if error_comment:
+                                invoice_result = {**invoice_result, "error_comment": error_comment}
+                                actions.append("comment_invoice_error")
+                        else:
+                            invoice_result = {
+                                **invoice_result,
+                                "delivery": delivery_result,
+                                "final_status_update": delivery_result.get("final_status_update"),
+                            }
+                            actions.append("upload_invoice_pdfs")
+                            actions.append("comment_invoice_details")
+                            actions.append("set_facturada_status")
                 elif invoice_result.get("status") not in {"applied", "dry_run_ready"}:
                     error_comment = _write_invoice_error_comment(
                         clickup=clickup,
@@ -796,6 +837,7 @@ def _build_invoice_error_comment(
         "post_sales_invoice": "REGISTRO/POSTEO DE LA FACTURA EN BUSINESS CENTRAL",
         "sync_fel_descriptions": "SINCRONIZACION DE DESCRIPCIONES FEL",
         "stamp_fel_invoice": "TIMBRADO FEL/SAT",
+        "envio_cliente": "ENVIO DE FACTURA AL CLIENTE DESDE BUSINESS CENTRAL",
         "entrega_clickup": "ENTREGA DE PDF Y REFERENCIAS EN CLICKUP",
     }.get(stage, stage.replace("_", " ").upper())
     status = str(invoice_result.get("status") or "error").strip()
