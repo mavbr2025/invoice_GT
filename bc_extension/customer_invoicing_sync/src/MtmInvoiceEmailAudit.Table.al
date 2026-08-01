@@ -20,6 +20,11 @@ table 71011 "MTM Invoice Email Audit"
         field(8; "Error Text"; Text[2048]) { DataClassification = CustomerContent; }
         field(9; "Attempt Count"; Integer) { DataClassification = SystemMetadata; }
         field(10; "Report Layout Name"; Text[100]) { DataClassification = SystemMetadata; }
+        field(11; "BC Email Message Id"; Guid) { DataClassification = SystemMetadata; }
+        field(12; "Sender Account Id"; Guid) { DataClassification = SystemMetadata; }
+        field(13; "Native Send Accepted"; Boolean) { DataClassification = SystemMetadata; }
+        field(14; "Native Sent Verified"; Boolean) { DataClassification = SystemMetadata; }
+        field(15; "Last Attempt At"; DateTime) { DataClassification = SystemMetadata; }
     }
 
     keys

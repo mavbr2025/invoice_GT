@@ -30,6 +30,11 @@ page 71012 "MTM Invoice Email Audit API"
                 field(errorText; Rec."Error Text") { Caption = 'Error Text'; }
                 field(attemptCount; Rec."Attempt Count") { Caption = 'Attempt Count'; }
                 field(reportLayoutName; Rec."Report Layout Name") { Caption = 'Report Layout Name'; }
+                field(bcEmailMessageId; Rec."BC Email Message Id") { Caption = 'BC Email Message Id'; }
+                field(senderAccountId; Rec."Sender Account Id") { Caption = 'Sender Account Id'; }
+                field(nativeSendAccepted; Rec."Native Send Accepted") { Caption = 'Native Send Accepted'; }
+                field(nativeSentVerified; Rec."Native Sent Verified") { Caption = 'Native Sent Verified'; }
+                field(lastAttemptAt; Rec."Last Attempt At") { Caption = 'Last Attempt At'; }
             }
         }
     }

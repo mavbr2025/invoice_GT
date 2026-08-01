@@ -19,18 +19,23 @@ approved MTM invoice layout.
 2. Business Central creates, posts, and FEL stamps each invoice.
 3. Business Central verifies `Stamp Received`, renders the approved PDF, and
    sends it through the `MTM Invoice Customer Delivery` email scenario.
-4. The extension writes an `MTM Invoice Email Audit` record with `Pending`,
-   `Sent`, or `Failed` status.
-5. Only after BC accepts the email does the bridge upload the PDF to ClickUp,
+4. Before sending, the extension persists the native Business Central email
+   message ID and the exact scenario account ID.
+5. `Sent` is recorded only after the exact message ID appears in BC's native
+   Sent Email relation for the posted invoice and the account ID matches the
+   configured Consuelo account.
+6. Only after that native evidence exists does the bridge upload the PDF to ClickUp,
    write the BC references, and set the task to `Facturada`.
 
 The send action is idempotent: a posted invoice already recorded as `Sent` is
-not emailed again. A `Failed` audit record is retried on the next controlled
-webhook run.
+not emailed again. If the API process stops after BC sends but before the audit
+finishes, the next run reconciles the stored message ID against native Sent
+Email evidence instead of sending a duplicate. A known failed send can be
+retried; an accepted send without native evidence is held for review.
 
 ## Required Business Central Configuration
 
-1. Publish `MTM Customer Invoicing Sync` version `0.1.8.31`.
+1. Publish `MTM Customer Invoicing Sync` version `0.1.8.32`.
 2. In **Email Accounts**, configure the Microsoft 365 account or shared mailbox
    `consuelo@mtmlogix.com`. The BC service identity must have permission to
    send from that mailbox.
@@ -60,8 +65,11 @@ stamping and before ClickUp finalization.
 
 ## Failure Handling
 
-- Missing recipient, PDF-rendering failure, or BC email-submission failure
-  creates or updates the BC audit row as `Failed`.
+- Missing scenario assignment, wrong sender, missing recipient, PDF-rendering
+  failure, or BC email-submission failure creates or updates a durable BC audit
+  row as `Failed` before the API returns the error.
+- A delivery is successful only when the audit includes the expected sender,
+  the native message ID, and `nativeSentVerified=true`.
 - The bridge adds a Spanish ClickUp error under
   `ENVIO DE FACTURA AL CLIENTE DESDE BUSINESS CENTRAL` and does not mark the
   task as `Facturada`.

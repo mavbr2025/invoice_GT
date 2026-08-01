@@ -7,6 +7,7 @@ from reportlab.pdfgen import canvas
 
 from clickup_integration.invoice_delivery import (
     finalize_clickup_issued_invoices,
+    send_issued_invoice_customer_emails,
     validate_invoice_pdf_layout,
 )
 from clickup_integration.invoice_sync import InvoiceAutomationSettings
@@ -87,6 +88,29 @@ class FakeBC:
 
     def build_sales_invoice_url(self, *, company_name, invoice_number):
         return f"https://bc.example/{company_name}/{invoice_number}"
+
+
+class FakeEmailBC(FakeBC):
+    def __init__(self, *, sender="consuelo@mtmlogix.com", native_verified=True, message_id="message-id"):
+        self.sender = sender
+        self.native_verified = native_verified
+        self.message_id = message_id
+        self.sent_row_ids = []
+
+    def get_posted_invoice_fel_description_by_number(self, invoice_number, *, market=None):
+        return {"id": f"fel-{invoice_number}"}
+
+    def send_posted_invoice_customer_email(self, fel_row_id, *, market=None):
+        self.sent_row_ids.append(fel_row_id)
+        return {}
+
+    def get_invoice_email_delivery_by_posted_invoice_id(self, invoice_id, *, market=None):
+        return {
+            "status": "Sent",
+            "senderEmail": self.sender,
+            "bcEmailMessageId": self.message_id,
+            "nativeSentVerified": self.native_verified,
+        }
 
 
 def make_settings() -> InvoiceAutomationSettings:
@@ -290,3 +314,34 @@ def test_validate_invoice_pdf_layout_accepts_mx_cfdi_markers() -> None:
 
     assert result["status"] == "passed"
     assert result["market"] == "MX"
+
+
+def test_send_customer_email_requires_native_bc_sent_evidence() -> None:
+    bc = FakeEmailBC()
+
+    result = send_issued_invoice_customer_emails(
+        bc_client=bc,
+        invoice_result=finalized_invoice_result(),
+        settings=make_settings(),
+    )
+
+    assert result["status"] == "sent"
+    assert result["sender"] == "consuelo@mtmlogix.com"
+    assert bc.sent_row_ids == ["fel-GTFVR0003923", "fel-GTFVR0003924"]
+
+
+@pytest.mark.parametrize(
+    ("bc", "error"),
+    [
+        (FakeEmailBC(sender="mario@mtmlogix.com"), "unexpected sender"),
+        (FakeEmailBC(message_id=""), "native email message evidence"),
+        (FakeEmailBC(native_verified=False), "native Sent Email record"),
+    ],
+)
+def test_send_customer_email_blocks_incomplete_native_bc_evidence(bc, error) -> None:
+    with pytest.raises(ValueError, match=error):
+        send_issued_invoice_customer_emails(
+            bc_client=bc,
+            invoice_result=finalized_invoice_result(),
+            settings=make_settings(),
+        )

@@ -105,6 +105,20 @@ def send_issued_invoice_customer_emails(
                 f"Audit status: {audit_status or 'missing'}. "
                 f"Detail: {(audit or {}).get('errorText') or 'none'}."
             )
+        audit_sender = str((audit or {}).get("senderEmail") or "").strip().lower()
+        if audit_sender != "consuelo@mtmlogix.com":
+            raise ValueError(
+                f"Business Central confirmed an unexpected sender for {invoice_number}: "
+                f"{audit_sender or 'missing'}."
+            )
+        if not str((audit or {}).get("bcEmailMessageId") or "").strip():
+            raise ValueError(
+                f"Business Central did not return native email message evidence for {invoice_number}."
+            )
+        if (audit or {}).get("nativeSentVerified") is not True:
+            raise ValueError(
+                f"Business Central did not verify the native Sent Email record for {invoice_number}."
+            )
         deliveries.append({"invoice_number": invoice_number, "invoice_id": invoice_id, "audit": audit})
 
     return {

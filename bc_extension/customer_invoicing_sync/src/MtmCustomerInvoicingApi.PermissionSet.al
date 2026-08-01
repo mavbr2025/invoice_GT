@@ -11,6 +11,7 @@ permissionset 71000 "MTM CUST INV API"
         tabledata "Report Selections" = R,
         tabledata "Sales Invoice Header" = R,
         tabledata "Sales Invoice Line" = RM,
+        tabledata "Sent Email" = R,
         tabledata "MTM Invoice Email Audit" = RIMD,
         tabledata "Sales Cr.Memo Header" = R,
         tabledata "Sales Cr.Memo Line" = RM,
