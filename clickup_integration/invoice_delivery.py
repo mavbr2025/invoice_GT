@@ -50,7 +50,7 @@ def should_validate_invoice_pdf_layout() -> bool:
 
 
 def should_send_invoice_customer_email() -> bool:
-    """Keep native BC customer delivery explicitly opt-in during rollout."""
+    """Control guarded native BC customer delivery for Guatemala invoice flows."""
     raw_value = os.getenv("CLICKUP_INVOICE_SEND_ENABLED", "false").strip().lower()
     return raw_value in {"1", "true", "yes", "on"}
 

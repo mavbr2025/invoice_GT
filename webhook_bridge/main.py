@@ -104,6 +104,7 @@ def inspection_invoice_sync_readiness() -> dict[str, Any]:
         "status": "not_ready" if missing_runtime_config else "ready",
         "missing_runtime_config": missing_runtime_config,
         "apply_mode": _env_bool("INSPECTION_INVOICE_WEBHOOK_APPLY", default=False),
+        "customer_email_enabled": should_send_invoice_customer_email(),
         "market": os.getenv("INSPECTION_INVOICE_MARKET", "GT").strip().upper() or "GT",
         "currency": os.getenv("INSPECTION_INVOICE_CURRENCY", "USD").strip().upper() or "USD",
         "payload_field_id": os.getenv(
@@ -482,39 +483,17 @@ async def clickup_invoice_sync(
                 )
                 actions.extend(invoice_result.get("completed_stages") or ["create_sales_invoice"])
                 if invoice_result.get("status") == "applied":
-                    if should_send_invoice_customer_email():
-                        try:
-                            customer_email_delivery = send_issued_invoice_customer_emails(
-                                bc_client=bc,
-                                invoice_result=invoice_result,
-                                settings=settings,
-                            )
-                        except Exception as exc:
-                            logger.exception(
-                                "Business Central customer email failed after invoice creation task_id=%s",
-                                summary.get("task_id"),
-                            )
-                            invoice_result = {
-                                **invoice_result,
-                                "status": "failed_post_creation",
-                                "failed_stage": "envio_cliente",
-                                "message": str(exc),
-                            }
-                            error_comment = _write_invoice_error_comment(
-                                clickup=clickup,
-                                clickup_summary=summary,
-                                stage="envio_cliente",
-                                invoice_result=invoice_result,
-                            )
-                            if error_comment:
-                                invoice_result = {**invoice_result, "error_comment": error_comment}
-                                actions.append("comment_invoice_error")
-                        else:
-                            invoice_result = {
-                                **invoice_result,
-                                "customer_email_delivery": customer_email_delivery,
-                            }
-                            actions.append("send_customer_email_from_bc")
+                    invoice_result, customer_email_action = _deliver_gt_customer_email_if_enabled(
+                        clickup=clickup,
+                        bc_client=bc,
+                        clickup_summary=summary,
+                        invoice_result=invoice_result,
+                        settings=settings,
+                    )
+                    if customer_email_action == "sent":
+                        actions.append("send_customer_email_from_bc")
+                    elif customer_email_action == "failed" and invoice_result.get("error_comment"):
+                        actions.append("comment_invoice_error")
 
                     if invoice_result.get("status") != "applied":
                         pass
@@ -664,12 +643,30 @@ async def clickup_inspection_invoice_sync(
             return result
 
         summary = summarize_task_for_customer_mapping(task)
+        invoice_settings = InvoiceAutomationSettings.from_env()
+        issued, customer_email_action = _deliver_gt_customer_email_if_enabled(
+            clickup=clickup,
+            bc_client=bc,
+            clickup_summary=summary,
+            invoice_result=issued,
+            settings=invoice_settings,
+        )
+        if customer_email_action == "failed":
+            result = {
+                "status": "failed",
+                "mode": "apply",
+                "task_id": task.get("id"),
+                "result": issued,
+            }
+            _log_webhook_result(task_id=str(task.get("id") or task_id), result=result)
+            return result
+
         delivery = finalize_clickup_issued_invoices(
             clickup=clickup,
             bc_client=bc,
             clickup_summary=summary,
             invoice_result=issued,
-            settings=InvoiceAutomationSettings.from_env(),
+            settings=invoice_settings,
             workspace_id=team_id,
             mark_status=False,
         )
@@ -683,6 +680,7 @@ async def clickup_inspection_invoice_sync(
             "delivery": delivery,
             "writeback": writeback,
             "final_status_update": final_status,
+            "customer_email_action": customer_email_action,
         }
         _log_webhook_result(task_id=str(task.get("id") or task_id), result=result)
         return result
@@ -787,6 +785,24 @@ async def clickup_invoice_deliver_posted(
             "created_invoices": [],
             "completed_stages": ["deliver_existing_posted_invoice"],
         }
+        invoice_result, customer_email_action = _deliver_gt_customer_email_if_enabled(
+            clickup=clickup,
+            bc_client=bc,
+            clickup_summary=summary,
+            invoice_result=invoice_result,
+            settings=settings,
+        )
+        if customer_email_action == "failed":
+            response = {
+                "status": "failed",
+                "action": "comment_invoice_error"
+                if invoice_result.get("error_comment")
+                else "customer_email_failed",
+                "result": invoice_result,
+            }
+            _log_webhook_result(task_id=task_id, result=response)
+            return response
+
         delivery_result = finalize_clickup_issued_invoices(
             clickup=clickup,
             bc_client=bc,
@@ -804,7 +820,14 @@ async def clickup_invoice_deliver_posted(
         }
         response = {
             "status": "processed",
-            "action": "deliver_existing_posted_invoices",
+            "action": ",".join(
+                action
+                for action in (
+                    "send_customer_email_from_bc" if customer_email_action == "sent" else "",
+                    "deliver_existing_posted_invoices",
+                )
+                if action
+            ),
             "result": result,
         }
         _log_webhook_result(task_id=task_id, result=response)
@@ -814,6 +837,53 @@ async def clickup_invoice_deliver_posted(
     except Exception as exc:  # pragma: no cover - exercised in runtime recovery
         logger.exception("ClickUp posted invoice delivery recovery failed for task_id=%s", task_id)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+def _deliver_gt_customer_email_if_enabled(
+    *,
+    clickup: ClickUpClient,
+    bc_client: BusinessCentralClient,
+    clickup_summary: dict[str, Any],
+    invoice_result: dict[str, Any],
+    settings: InvoiceAutomationSettings,
+) -> tuple[dict[str, Any], str]:
+    market = str(invoice_result.get("market") or settings.supported_market or "").strip().upper()
+    if market != "GT":
+        return invoice_result, "not_applicable"
+    if not should_send_invoice_customer_email():
+        return invoice_result, "disabled"
+
+    try:
+        customer_email_delivery = send_issued_invoice_customer_emails(
+            bc_client=bc_client,
+            invoice_result=invoice_result,
+            settings=settings,
+        )
+    except Exception as exc:
+        logger.exception(
+            "Business Central customer email failed after GT invoice creation task_id=%s",
+            clickup_summary.get("task_id"),
+        )
+        failed_result = {
+            **invoice_result,
+            "status": "failed_post_creation",
+            "failed_stage": "envio_cliente",
+            "message": str(exc),
+        }
+        error_comment = _write_invoice_error_comment(
+            clickup=clickup,
+            clickup_summary=clickup_summary,
+            stage="envio_cliente",
+            invoice_result=failed_result,
+        )
+        if error_comment:
+            failed_result = {**failed_result, "error_comment": error_comment}
+        return failed_result, "failed"
+
+    return {
+        **invoice_result,
+        "customer_email_delivery": customer_email_delivery,
+    }, "sent"
 
 
 def _write_invoice_error_comment(

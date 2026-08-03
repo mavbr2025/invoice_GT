@@ -67,8 +67,10 @@ and returns the proposed BC header and lines without changing either system.
 
 - `CLICKUP_WEBHOOK_TOKEN` must be set and used as the ClickUp webhook bearer token.
 - `CLICKUP_INVOICE_WEBHOOK_APPLY=false` keeps the webhook in dry-run mode.
-- `CLICKUP_INVOICE_WEBHOOK_APPLY=true` allows the full flow: status update, BC invoice creation, BC post, FEL stamp, PDF upload, ClickUp comment, and final `Facturada` status.
-- The code does not use the legacy FEL customer-send action. It stamps through BC/FEL and downloads the Business Central `pdfDocument`.
+- `CLICKUP_INVOICE_WEBHOOK_APPLY=true` allows the standard invoice flow to create, post, and FEL-stamp invoices.
+- `CLICKUP_INVOICE_SEND_ENABLED=true` applies one guarded delivery contract to every Guatemala webhook path: standard shipment invoices, inspection invoices when their independent apply mode is enabled, and posted-invoice recovery. Business Central sends the approved branded message from `consuelo@mtmlogix.com`, and the bridge requires native Sent Email evidence before ClickUp is finalized.
+- A send failure writes a Spanish ClickUp error and prevents the task from being marked complete. The Business Central audit makes recovery idempotent and prevents duplicate customer emails.
+- The bridge downloads and validates the Business Central `pdfDocument`; it does not use the legacy Infile customer-delivery email.
 - Configure secrets through AWS App Runner/ECS environment variables or Secrets Manager, not through files committed to git.
 
 ## Manual Special Requirements

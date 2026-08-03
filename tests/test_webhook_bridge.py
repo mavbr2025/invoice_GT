@@ -603,6 +603,7 @@ def test_invoice_webhook_apply_creates_invoice_and_writes_back(monkeypatch) -> N
 
     fake_clickup_clients: list[_FakeInvoiceClickUpClient] = []
     fake_bc_clients: list[_FakeInvoiceBCClient] = []
+    email_calls: list[dict[str, object]] = []
 
     def clickup_factory(settings):
         client = _FakeInvoiceClickUpClient(settings)
@@ -620,10 +621,16 @@ def test_invoice_webhook_apply_creates_invoice_and_writes_back(monkeypatch) -> N
     monkeypatch.setenv("CLICKUP_WEBHOOK_TOKEN", "expected-token")
     monkeypatch.setenv("CLICKUP_WEBHOOK_CUSTOM_TASK_IDS", "true")
     monkeypatch.setenv("CLICKUP_INVOICE_WEBHOOK_APPLY", "true")
+    monkeypatch.setenv("CLICKUP_INVOICE_SEND_ENABLED", "true")
     monkeypatch.setattr("webhook_bridge.main.ClickUpClient", clickup_factory)
     monkeypatch.setattr("webhook_bridge.main.BusinessCentralClient", bc_factory)
     monkeypatch.setattr("webhook_bridge.main.BusinessCentralSettings.from_env", lambda: object())
     monkeypatch.setattr("webhook_bridge.main.InvoiceAutomationSettings.from_env", _invoice_settings)
+    monkeypatch.setattr(
+        "webhook_bridge.main.send_issued_invoice_customer_emails",
+        lambda **kwargs: email_calls.append(kwargs)
+        or {"status": "sent", "sender": "consuelo@mtmlogix.com"},
+    )
 
     response = TestClient(app).post(
         "/clickup/webhooks/invoice-sync/task-1",
@@ -636,9 +643,15 @@ def test_invoice_webhook_apply_creates_invoice_and_writes_back(monkeypatch) -> N
     assert payload["mode"] == "apply"
     assert payload["action"] == (
         "update_status,create_sales_invoice,post_sales_invoice,sync_fel_descriptions,"
-        "stamp_fel_invoice,upload_invoice_pdfs,comment_invoice_details,set_facturada_status"
+        "stamp_fel_invoice,send_customer_email_from_bc,upload_invoice_pdfs,"
+        "comment_invoice_details,set_facturada_status"
     )
     assert payload["result"]["status"] == "applied"
+    assert payload["result"]["customer_email_delivery"] == {
+        "status": "sent",
+        "sender": "consuelo@mtmlogix.com",
+    }
+    assert len(email_calls) == 1
     assert fake_bc_clients[0].created_headers[0]["externalDocumentNumber"] == "PO-1-INT"
     assert fake_bc_clients[0].created_headers[1]["externalDocumentNumber"] == "PO-1-NAT"
     assert fake_bc_clients[0].created_headers[0]["paymentTermsId"] == "term-30-days"
@@ -689,6 +702,79 @@ def test_invoice_webhook_apply_creates_invoice_and_writes_back(monkeypatch) -> N
     assert fake_clickup_clients[0].field_updates == [
         {"task_id": "task-1", "field_id": "invoice-status", "value": "status-ready"},
         {"task_id": "task-1", "field_id": "invoice-status", "value": "status-invoiced"},
+    ]
+
+
+def test_posted_invoice_recovery_uses_customer_email_flow_before_clickup_delivery(monkeypatch) -> None:
+    from fastapi.testclient import TestClient
+
+    fake_clickup_clients: list[_FakeInvoiceClickUpClient] = []
+    email_calls: list[dict[str, object]] = []
+
+    class RecoveryBC(_FakeInvoiceBCClient):
+        def get_posted_sales_invoice_by_number(self, invoice_number: str, *, market=None):
+            assert invoice_number == "GTFVRTEST1"
+            assert market == "GT"
+            return {
+                "id": "posted-invoice-id",
+                "number": invoice_number,
+                "externalDocumentNumber": "PO-1-INT",
+            }
+
+        def get_posted_invoice_fel_description_by_number(
+            self,
+            invoice_number: str,
+            *,
+            company_id=None,
+            market=None,
+        ):
+            assert invoice_number == "GTFVRTEST1"
+            return {
+                "id": "fel-row-1",
+                "number": invoice_number,
+                "electronicDocumentStatus": "Stamp Received",
+                "errorDescription": "",
+            }
+
+    def clickup_factory(settings):
+        client = _FakeInvoiceClickUpClient(settings)
+        fake_clickup_clients.append(client)
+        return client
+
+    monkeypatch.setenv("CLICKUP_ACCESS_TOKEN", "pk_test")
+    monkeypatch.setenv("CLICKUP_DEFAULT_WORKSPACE_ID", "8451352")
+    monkeypatch.setenv("CLICKUP_WEBHOOK_TEAM_ID", "8451352")
+    monkeypatch.setenv("CLICKUP_WEBHOOK_TOKEN", "expected-token")
+    monkeypatch.setenv("CLICKUP_WEBHOOK_CUSTOM_TASK_IDS", "true")
+    monkeypatch.setenv("CLICKUP_INVOICE_SEND_ENABLED", "true")
+    monkeypatch.setattr("webhook_bridge.main.ClickUpClient", clickup_factory)
+    monkeypatch.setattr(
+        "webhook_bridge.main.BusinessCentralClient",
+        lambda settings: RecoveryBC(settings),
+    )
+    monkeypatch.setattr("webhook_bridge.main.BusinessCentralSettings.from_env", lambda: object())
+    monkeypatch.setattr("webhook_bridge.main.InvoiceAutomationSettings.from_env", _invoice_settings)
+    monkeypatch.setattr(
+        "webhook_bridge.main.send_issued_invoice_customer_emails",
+        lambda **kwargs: email_calls.append(kwargs)
+        or {"status": "sent", "sender": "consuelo@mtmlogix.com"},
+    )
+
+    response = TestClient(app).post(
+        "/clickup/webhooks/invoice-delivery-recovery",
+        headers={"Authorization": "Bearer expected-token"},
+        json={"task_id": "task-1", "invoice_numbers": ["GTFVRTEST1"]},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "processed"
+    assert payload["action"] == "send_customer_email_from_bc,deliver_existing_posted_invoices"
+    assert payload["result"]["status"] == "delivered"
+    assert payload["result"]["customer_email_delivery"]["status"] == "sent"
+    assert len(email_calls) == 1
+    assert [upload["file_name"] for upload in fake_clickup_clients[0].custom_field_uploads] == [
+        "PO-1-INT.pdf"
     ]
 
 

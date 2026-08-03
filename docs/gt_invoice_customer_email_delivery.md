@@ -15,7 +15,8 @@ approved MTM invoice layout.
 
 ## Flow
 
-1. ClickUp starts the normal invoice webhook.
+1. ClickUp starts a Guatemala invoice webhook: standard shipment, inspection,
+   or posted-invoice recovery.
 2. Business Central creates, posts, and FEL stamps each invoice.
 3. Business Central verifies `Stamp Received`, renders the approved PDF, and
    sends it through the `MTM Invoice Customer Delivery` email scenario.
@@ -35,7 +36,7 @@ retried; an accepted send without native evidence is held for review.
 
 ## Required Business Central Configuration
 
-1. Publish `MTM Customer Invoicing Sync` version `0.1.8.38` or later.
+1. Publish `MTM Customer Invoicing Sync` version `0.1.8.40` or later.
 2. In **Email Accounts**, configure the Microsoft 365 account or shared mailbox
    `consuelo@mtmlogix.com`. The BC service identity must have permission to
    send from that mailbox.
@@ -103,8 +104,13 @@ CLICKUP_INVOICE_SEND_ENABLED=false
 ```
 
 Set it to `true` in the Elastic Beanstalk environment only after the six BC
-configuration checks above pass. A normal webhook then sends the email after
-stamping and before ClickUp finalization.
+configuration checks above pass. The gate then applies to every Guatemala
+webhook-issued invoice: standard shipment invoices, inspection invoices when
+`INSPECTION_INVOICE_WEBHOOK_APPLY=true`, and posted-invoice recovery. Each path
+sends after stamping and before ClickUp finalization.
+
+`INSPECTION_INVOICE_WEBHOOK_APPLY` remains an independent issuance control.
+Enabling customer email delivery does not enable inspection invoice creation.
 
 ## Failure Handling
 
