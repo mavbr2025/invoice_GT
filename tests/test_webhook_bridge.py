@@ -44,6 +44,18 @@ def test_customer_webhook_accepts_task_id_path_before_auth(monkeypatch) -> None:
     assert response.status_code == 401
 
 
+def test_invoice_email_logo_is_public_versioned_png() -> None:
+    from fastapi.testclient import TestClient
+
+    response = TestClient(app).get("/assets/mtm-logix-email-logo-porcelain-v1.png")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/png"
+    assert response.headers["cache-control"] == "public, max-age=31536000, immutable"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.content.startswith(b"\x89PNG\r\n\x1a\n")
+
+
 def test_extract_invoice_numbers_accepts_mx_posted_prefix(monkeypatch) -> None:
     monkeypatch.setenv("CLICKUP_INVOICE_MARKET", "MX")
 

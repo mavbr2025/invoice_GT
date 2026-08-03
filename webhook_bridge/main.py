@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
 from urllib.parse import parse_qsl
 
 from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.responses import FileResponse
 
 from business_central_client.client import BusinessCentralClient
 from business_central_client.config import Settings as BusinessCentralSettings
@@ -37,11 +39,28 @@ from inspection_invoices.service import (
 app = FastAPI(title="ClickUp to Business Central Customer Bridge")
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+EMAIL_LOGO_PATH = (
+    Path(__file__).resolve().parent
+    / "assets"
+    / "mtm-logix-email-logo-porcelain-v1.png"
+)
 
 
 @app.get("/healthz")
 def healthz() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/assets/mtm-logix-email-logo-porcelain-v1.png", include_in_schema=False)
+def mtm_invoice_email_logo() -> FileResponse:
+    return FileResponse(
+        EMAIL_LOGO_PATH,
+        media_type="image/png",
+        headers={
+            "Cache-Control": "public, max-age=31536000, immutable",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @app.get("/clickup/webhooks/invoice-sync/readiness")

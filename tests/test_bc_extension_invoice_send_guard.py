@@ -31,6 +31,12 @@ CANARY_EVIDENCE_API = (
     / "MtmInvoiceEmailCanaryEvidenceApi.Page.al"
 )
 SMTP_PREFLIGHT = ROOT / "scripts" / "check_bc_smtp_oauth_preflight.py"
+EMAIL_LOGO = (
+    ROOT
+    / "webhook_bridge"
+    / "assets"
+    / "mtm-logix-email-logo-porcelain-v1.png"
+)
 
 
 def _send_fel_invoice_body() -> str:
@@ -59,6 +65,27 @@ def test_native_invoice_email_requires_exact_scenario_account_and_sent_evidence(
     assert "GetMessageId()" in source
     assert "GetAccountId()" in source
     assert "Document-Mailing" not in source
+
+
+def test_native_invoice_email_uses_controlled_https_command_era_logo() -> None:
+    source = EMAIL_MGT.read_text(encoding="utf-8")
+
+    assert EMAIL_LOGO.is_file()
+    assert EMAIL_LOGO.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+    assert (
+        "https://mhth6mu5g8.execute-api.us-east-1.amazonaws.com/"
+        "assets/mtm-logix-email-logo-porcelain-v1.png"
+    ) in source
+    assert "<img src=\"' + LogoUrlLbl + '\"" in source
+    assert "NavApp.GetResource" not in source
+    assert "'image/png', true" not in source
+
+
+def test_native_invoice_email_uses_approved_footer_line() -> None:
+    source = EMAIL_MGT.read_text(encoding="utf-8")
+
+    assert "Beyond Visibility. Into Command." in source
+    assert "MTM Logix | Logistics with command and clarity" not in source
 
 
 def test_invoice_pdf_render_is_filtered_to_one_posted_invoice() -> None:

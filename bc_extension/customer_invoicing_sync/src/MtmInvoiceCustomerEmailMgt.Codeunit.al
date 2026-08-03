@@ -4,6 +4,7 @@ codeunit 71013 "MTM Invoice Customer Email Mgt"
         ExpectedSenderLbl: Label 'consuelo@mtmlogix.com', Locked = true;
         TestRecipientLbl: Label 'mario@mtmlogix.com', Locked = true;
         LayoutNameLbl: Label 'MTMGTInvoiceStandard202606OnePage', Locked = true;
+        LogoUrlLbl: Label 'https://mhth6mu5g8.execute-api.us-east-1.amazonaws.com/assets/mtm-logix-email-logo-porcelain-v1.png', Locked = true;
         ScenarioNotConfiguredErr: Label 'The MTM Invoice Customer Delivery email scenario is not assigned to an email account.';
         WrongSenderErr: Label 'The MTM Invoice Customer Delivery email scenario is assigned to %1. It must be assigned to %2.';
 
@@ -457,16 +458,17 @@ codeunit 71013 "MTM Invoice Customer Email Mgt"
             '<!doctype html><html><body style="margin:0;background:#F7F5EF;font-family:Noto Sans,Aptos,Arial,sans-serif;color:#050B2E;">' +
             '<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td align="center" style="padding:32px 16px;">' +
             '<table role="presentation" width="640" cellpadding="0" cellspacing="0" style="max-width:640px;background:#FFFFFF;border:1px solid #D9D5CA;">' +
-            '<tr><td style="background:#050B2E;padding:26px 32px;border-bottom:5px solid #C9A24A;">' +
-            '<div style="color:#C9A24A;font-size:12px;font-weight:700;letter-spacing:1px;">MTM LOGIX</div>' +
-            '<div style="color:#FFFFFF;font-size:24px;font-weight:700;margin-top:8px;">FACTURA ELECTRONICA</div></td></tr>' +
+            '<tr><td style="background:#F7F5EF;padding:20px 32px;">' +
+            '<img src="' + LogoUrlLbl + '" width="238" height="58" alt="MTM Logix" style="display:block;width:238px;max-width:100%;height:auto;border:0;outline:none;text-decoration:none;"></td></tr>' +
+            '<tr><td style="background:#050B2E;padding:22px 32px;border-bottom:5px solid #C9A24A;">' +
+            '<div style="color:#FFFFFF;font-size:24px;font-weight:700;">FACTURA ELECTRONICA</div></td></tr>' +
             '<tr><td style="padding:32px;font-size:15px;line-height:1.55;">' +
             '<p style="margin:0 0 16px;">Estimado/a ' + EscapeHtml(Customer.Name) + ',</p>' +
             '<p style="margin:0 0 16px;">Adjuntamos la factura electronica <strong>' + EscapeHtml(PostedInvoice."No.") +
             '</strong>. El PDF adjunto contiene el detalle y las referencias operativas del embarque.</p>' +
             '<p style="margin:24px 0 0;">Atentamente,<br><strong>Consuelo Velasquez</strong><br>MTM Logix<br>' + ExpectedSenderLbl + '</p>' +
             '</td></tr><tr><td style="padding:18px 32px;background:#F7F5EF;border-top:1px solid #D9D5CA;color:#5E6474;font-size:12px;">' +
-            'MTM Logix | Logistics with command and clarity</td></tr></table></td></tr></table></body></html>');
+            'Beyond Visibility. Into Command.</td></tr></table></td></tr></table></body></html>');
     end;
 
     local procedure EscapeHtml(Value: Text): Text
