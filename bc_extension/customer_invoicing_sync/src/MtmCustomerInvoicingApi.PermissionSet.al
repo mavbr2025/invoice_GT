@@ -25,6 +25,7 @@ permissionset 71000 "MTM CUST INV API"
         page "MTM Doc Sending Profiles API" = X,
         page "MTM Posted Inv FEL Desc API" = X,
         page "MTM Invoice Email Audit API" = X,
+        page "MTM Inv Email Canary Ev API" = X,
         page "MTM Posted Cr Memo FEL API" = X,
         page "MTM Report Layout List API" = X,
         page "MTM Report Layout Sel API" = X,

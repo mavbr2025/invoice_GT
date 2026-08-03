@@ -168,6 +168,19 @@ page 71007 "MTM Posted Inv FEL Desc API"
     end;
 
     [ServiceEnabled]
+    procedure SendApprovedInvoiceTestEmailToMario(var ActionContext: WebServiceActionContext)
+    var
+        InvoiceCustomerEmailMgt: Codeunit "MTM Invoice Customer Email Mgt";
+    begin
+        InvoiceCustomerEmailMgt.SendApprovedInvoiceTestEmailToMario(Rec);
+
+        ActionContext.SetObjectType(ObjectType::Page);
+        ActionContext.SetObjectId(Page::"MTM Posted Inv FEL Desc API");
+        ActionContext.AddEntityKey(Rec.FieldNo(SystemId), Rec.SystemId);
+        ActionContext.SetResultCode(WebServiceActionResultCode::Updated);
+    end;
+
+    [ServiceEnabled]
     procedure ProcessFelInvoiceResponse(var ActionContext: WebServiceActionContext)
     var
         GTMLeerDocumentos: Codeunit GTMLeerDocumentos;

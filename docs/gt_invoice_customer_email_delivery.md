@@ -35,7 +35,7 @@ retried; an accepted send without native evidence is held for review.
 
 ## Required Business Central Configuration
 
-1. Publish `MTM Customer Invoicing Sync` version `0.1.8.32`.
+1. Publish `MTM Customer Invoicing Sync` version `0.1.8.38` or later.
 2. In **Email Accounts**, configure the Microsoft 365 account or shared mailbox
    `consuelo@mtmlogix.com`. The BC service identity must have permission to
    send from that mailbox.
@@ -50,6 +50,49 @@ retried; an accepted send without native evidence is held for review.
 6. Disable any Infile notification/template that independently emails the
    legacy PDF when a DTE is stamped. There must be one customer-facing delivery
    path: this BC email scenario.
+
+## Controlled Internal Canary
+
+Before enabling customer delivery, the separate
+`SendApprovedInvoiceTestEmailToMario` action may send an already posted and
+FEL-stamped invoice to `mario@mtmlogix.com`. It uses the same Consuelo scenario,
+Command Era body, `FacturaGTM` PDF, and native Sent Email verification as the
+customer path. It does not create or post an invoice, does not read or change
+the customer's email, and does not mark the customer-delivery audit as sent.
+The posted-invoice API reports invoice-scoped canary evidence as `Sent`,
+`Outbox`, `NotFound`, or a configuration error. The canary command checks this
+evidence before sending, allows additional time for PDF rendering and native
+delivery, and never retries an ambiguous timeout automatically.
+An existing failed outbox record requires the operator-only
+`--retry-failed` flag; a queued, unknown, timed-out, or already-sent message
+cannot be retried by the canary command.
+
+For unattended webhook delivery, the SMTP connector uses the dedicated
+`MTM BC Invoice SMTP Sender` Microsoft Entra application. The application is
+registered as an Exchange service principal and receives the Exchange
+Application RBAC role `Application SMTP.SendAsApp` through an exact recipient
+scope for Consuelo's mailbox. The Entra application intentionally has no
+Exchange Online application-role claim and does not receive mailbox
+`FullAccess`; adding the `SMTP.SendAsApp` Entra claim would make Exchange apply
+the legacy mailbox-permission check instead of the scoped RBAC authorization.
+The mailbox identity is `connie@mtmlogix.com`; the approved sender address
+`consuelo@mtmlogix.com` is its secondary SMTP alias. Interactive delegated OAuth
+is not suitable for an unattended webhook because it depends on a user's
+refreshable sign-in session.
+
+Validate the production credential without sending mail before any canary:
+
+```text
+python scripts/check_bc_smtp_oauth_preflight.py \
+  --tenant-id <tenant-id> \
+  --client-id <client-id> \
+  --client-secret-file <secret-file> \
+  --mailbox connie@mtmlogix.com
+```
+
+The preflight must report SMTP code `235`, `sent_email=false`, and an empty
+token `roles` array. A non-empty roles claim is a release blocker for this
+mailbox-scoped RBAC design.
 
 ## AWS Feature Gate
 

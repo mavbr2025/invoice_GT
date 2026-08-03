@@ -2,6 +2,7 @@ codeunit 71013 "MTM Invoice Customer Email Mgt"
 {
     var
         ExpectedSenderLbl: Label 'consuelo@mtmlogix.com', Locked = true;
+        TestRecipientLbl: Label 'mario@mtmlogix.com', Locked = true;
         LayoutNameLbl: Label 'MTMGTInvoiceStandard202606OnePage', Locked = true;
         ScenarioNotConfiguredErr: Label 'The MTM Invoice Customer Delivery email scenario is not assigned to an email account.';
         WrongSenderErr: Label 'The MTM Invoice Customer Delivery email scenario is assigned to %1. It must be assigned to %2.';
@@ -105,7 +106,8 @@ codeunit 71013 "MTM Invoice Customer Email Mgt"
         if not TrySendInvoiceEmail(MessageId, SenderAccount) then begin
             Audit.Get(PostedInvoice.SystemId);
             Audit."Native Send Accepted" := false;
-            FailAudit(Audit, CopyStr(GetLastErrorText(), 1, MaxStrLen(Audit."Error Text")));
+            EvidenceError := GetSendFailureEvidence(PostedInvoice, MessageId, GetLastErrorText());
+            FailAudit(Audit, CopyStr(EvidenceError, 1, MaxStrLen(Audit."Error Text")));
         end;
 
         Audit.Get(PostedInvoice.SystemId);
@@ -121,6 +123,153 @@ codeunit 71013 "MTM Invoice Customer Email Mgt"
                 MessageId,
                 PostedInvoice."No.");
         FailAudit(Audit, EvidenceError);
+    end;
+
+    procedure SendApprovedInvoiceTestEmailToMario(PostedInvoice: Record "Sales Invoice Header")
+    var
+        Customer: Record Customer;
+        SenderAccount: Record "Email Account" temporary;
+        AttachmentBlob: Codeunit "Temp Blob";
+        AttachmentName: Text[250];
+        EmailSubject: Text[250];
+        EmailBody: Text;
+        EvidenceError: Text;
+        MessageId: Guid;
+    begin
+        if not IsStamped(PostedInvoice) then
+            Error('Invoice %1 cannot be used for the email canary until FEL status is Stamp Received.', PostedInvoice."No.");
+
+        if not ResolveRequiredSenderAccount(SenderAccount, EvidenceError) then
+            Error(EvidenceError);
+
+        if not Customer.Get(PostedInvoice."Sell-to Customer No.") then
+            Error('Customer %1 was not found.', PostedInvoice."Sell-to Customer No.");
+
+        if not TryRenderApprovedInvoicePdf(PostedInvoice, AttachmentBlob) then
+            Error(GetLastErrorText());
+
+        AttachmentName := CopyStr(StrSubstNo('Factura_%1.pdf', PostedInvoice."No."), 1, MaxStrLen(AttachmentName));
+        EmailSubject := CopyStr(StrSubstNo('PRUEBA INTERNA | MTM Logix | Factura electronica %1', PostedInvoice."No."), 1, MaxStrLen(EmailSubject));
+        EmailBody := BuildCommandEraEmailBody(PostedInvoice, Customer);
+        if not TryPrepareInvoiceEmail(
+            PostedInvoice,
+            AttachmentBlob,
+            AttachmentName,
+            EmailSubject,
+            EmailBody,
+            TestRecipientLbl,
+            MessageId)
+        then
+            Error(GetLastErrorText());
+
+        if not TrySendInvoiceEmail(MessageId, SenderAccount) then
+            Error(GetLastErrorText());
+
+        if not HasNativeSentEmailEvidence(
+            PostedInvoice,
+            MessageId,
+            SenderAccount."Account Id",
+            EvidenceError)
+        then begin
+            if EvidenceError = '' then
+                EvidenceError := StrSubstNo(
+                    'Business Central accepted internal canary message %1 for invoice %2, but its exact native Sent Email record was not found.',
+                    MessageId,
+                    PostedInvoice."No.");
+            Error(EvidenceError);
+        end;
+    end;
+
+    procedure GetApprovedInvoiceTestEmailEvidence(PostedInvoice: Record "Sales Invoice Header"): Text
+    var
+        EmailOutbox: Record "Email Outbox" temporary;
+        SenderAccount: Record "Email Account" temporary;
+        SentEmail: Record "Sent Email" temporary;
+        Email: Codeunit Email;
+        EvidenceError: Text;
+        ExpectedSubject: Text[250];
+        MessageId: Guid;
+        SenderEvidence: Text;
+    begin
+        if not ResolveRequiredSenderAccount(SenderAccount, EvidenceError) then
+            exit('ConfigurationError|' + EvidenceError);
+
+        SenderEvidence := BuildSenderEvidence(SenderAccount);
+
+        ExpectedSubject := CopyStr(
+            StrSubstNo('PRUEBA INTERNA | MTM Logix | Factura electronica %1', PostedInvoice."No."),
+            1,
+            MaxStrLen(ExpectedSubject));
+
+        Email.GetSentEmailsForRecord(Database::"Sales Invoice Header", PostedInvoice.SystemId, SentEmail);
+        if SentEmail.FindSet() then
+            repeat
+                MessageId := SentEmail.GetMessageId();
+                if IsMatchingInternalCanaryMessage(MessageId, ExpectedSubject) then begin
+                    if SentEmail.GetAccountId() <> SenderAccount."Account Id" then
+                        exit(StrSubstNo('SentWrongAccount|MessageId=%1|%2', MessageId, SenderEvidence));
+                    exit(StrSubstNo('Sent|MessageId=%1|Recipient=%2|%3', MessageId, TestRecipientLbl, SenderEvidence));
+                end;
+            until SentEmail.Next() = 0;
+
+        Email.GetEmailOutboxForRecord(PostedInvoice, EmailOutbox);
+        if EmailOutbox.FindSet() then
+            repeat
+                MessageId := EmailOutbox.GetMessageId();
+                if IsMatchingInternalCanaryMessage(MessageId, ExpectedSubject) then
+                    exit(
+                        StrSubstNo(
+                            'Outbox|MessageId=%1|Status=%2|Recipient=%3',
+                            MessageId,
+                            Format(Email.GetOutboxEmailRecordStatus(MessageId)),
+                            TestRecipientLbl) + '|' + SenderEvidence + '|' + BuildOutboxEvidence(EmailOutbox));
+            until EmailOutbox.Next() = 0;
+
+        exit('NotFound|' + SenderEvidence);
+    end;
+
+    local procedure BuildSenderEvidence(SenderAccount: Record "Email Account" temporary): Text
+    begin
+        exit(
+            StrSubstNo(
+                'Sender=%1|AccountId=%2|Connector=%3|AccountName=%4',
+                SenderAccount."Email Address",
+                SenderAccount."Account Id",
+                Format(SenderAccount.Connector),
+                SenderAccount.Name));
+    end;
+
+    local procedure BuildOutboxEvidence(EmailOutbox: Record "Email Outbox" temporary): Text
+    var
+        OutboxRef: RecordRef;
+        ErrorMessage: Text;
+        SendFrom: Text;
+        DateFailed: Text;
+    begin
+        OutboxRef.GetTable(EmailOutbox);
+        ErrorMessage := ReadTextField(OutboxRef, 'Error Message');
+        ErrorMessage := ErrorMessage.Replace('|', '/').Replace('\r', ' ').Replace('\n', ' ');
+        SendFrom := ReadTextField(OutboxRef, 'Send From');
+        DateFailed := ReadTextField(OutboxRef, 'Date Failed');
+        exit(StrSubstNo('SendFrom=%1|DateFailed=%2|ProviderError=%3', SendFrom, DateFailed, ErrorMessage));
+    end;
+
+    local procedure GetSendFailureEvidence(
+        PostedInvoice: Record "Sales Invoice Header";
+        MessageId: Guid;
+        SendError: Text): Text
+    var
+        EmailOutbox: Record "Email Outbox" temporary;
+        Email: Codeunit Email;
+    begin
+        Email.GetEmailOutboxForRecord(PostedInvoice, EmailOutbox);
+        if EmailOutbox.FindSet() then
+            repeat
+                if EmailOutbox.GetMessageId() = MessageId then
+                    exit(SendError + ' | ' + BuildOutboxEvidence(EmailOutbox));
+            until EmailOutbox.Next() = 0;
+
+        exit(SendError);
     end;
 
     local procedure IsStamped(PostedInvoice: Record "Sales Invoice Header"): Boolean
@@ -171,12 +320,37 @@ codeunit 71013 "MTM Invoice Customer Email Mgt"
         var Audit: Record "MTM Invoice Email Audit";
         PostedInvoice: Record "Sales Invoice Header";
         var EvidenceError: Text): Boolean
+    begin
+        if not HasNativeSentEmailEvidence(
+            PostedInvoice,
+            Audit."BC Email Message Id",
+            Audit."Sender Account Id",
+            EvidenceError)
+        then
+            exit(false);
+
+        Audit.Get(PostedInvoice.SystemId);
+        Audit.Status := Audit.Status::Sent;
+        Audit."Native Send Accepted" := true;
+        Audit."Native Sent Verified" := true;
+        Audit."Sent At" := CurrentDateTime();
+        Audit."Error Text" := '';
+        Audit.Modify(true);
+        Commit();
+        exit(true);
+    end;
+
+    local procedure HasNativeSentEmailEvidence(
+        PostedInvoice: Record "Sales Invoice Header";
+        MessageId: Guid;
+        SenderAccountId: Guid;
+        var EvidenceError: Text): Boolean
     var
         SentEmail: Record "Sent Email" temporary;
         Email: Codeunit Email;
     begin
         EvidenceError := '';
-        if IsNullGuid(Audit."BC Email Message Id") then
+        if IsNullGuid(MessageId) then
             exit(false);
 
         Email.GetSentEmailsForRecord(Database::"Sales Invoice Header", PostedInvoice.SystemId, SentEmail);
@@ -184,24 +358,35 @@ codeunit 71013 "MTM Invoice Customer Email Mgt"
             exit(false);
 
         repeat
-            if SentEmail.GetMessageId() = Audit."BC Email Message Id" then begin
-                if SentEmail.GetAccountId() <> Audit."Sender Account Id" then begin
+            if SentEmail.GetMessageId() = MessageId then begin
+                if SentEmail.GetAccountId() <> SenderAccountId then begin
                     EvidenceError := StrSubstNo(
                         'Native Sent Email evidence for message %1 used an unexpected Business Central sender account.',
-                        Audit."BC Email Message Id");
+                        MessageId);
                     exit(false);
                 end;
-                Audit.Get(PostedInvoice.SystemId);
-                Audit.Status := Audit.Status::Sent;
-                Audit."Native Send Accepted" := true;
-                Audit."Native Sent Verified" := true;
-                Audit."Sent At" := CurrentDateTime();
-                Audit."Error Text" := '';
-                Audit.Modify(true);
-                Commit();
                 exit(true);
             end;
         until SentEmail.Next() = 0;
+
+        exit(false);
+    end;
+
+    local procedure IsMatchingInternalCanaryMessage(MessageId: Guid; ExpectedSubject: Text): Boolean
+    var
+        EmailMessage: Codeunit "Email Message";
+        Recipient: Text;
+        ToRecipients: List of [Text];
+    begin
+        if not EmailMessage.Get(MessageId) then
+            exit(false);
+        if EmailMessage.GetSubject() <> ExpectedSubject then
+            exit(false);
+
+        EmailMessage.GetRecipients(Enum::"Email Recipient Type"::"To", ToRecipients);
+        foreach Recipient in ToRecipients do
+            if LowerCase(Recipient) = LowerCase(TestRecipientLbl) then
+                exit(true);
 
         exit(false);
     end;
@@ -222,6 +407,7 @@ codeunit 71013 "MTM Invoice Customer Email Mgt"
         AttachmentOutStream: OutStream;
         InvoiceRef: RecordRef;
     begin
+        PostedInvoice.SetRecFilter();
         InvoiceRef.GetTable(PostedInvoice);
         AttachmentBlob.CreateOutStream(AttachmentOutStream);
         Report.SaveAs(Report::FacturaGTM, '', ReportFormat::Pdf, AttachmentOutStream, InvoiceRef);
