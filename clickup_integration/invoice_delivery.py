@@ -97,7 +97,13 @@ def send_issued_invoice_customer_emails(
             market=market,
         )
         bc_client.send_posted_invoice_customer_email(fel_row_id, market=market)
-        audit = bc_client.get_invoice_email_delivery_by_posted_invoice_id(invoice_id, market=market)
+        # The standard salesInvoices API id is not the posted Sales Invoice Header
+        # SystemId used by the extension audit table. The FEL API row is keyed by
+        # that posted SystemId, so use it for the authoritative delivery readback.
+        audit = bc_client.get_invoice_email_delivery_by_posted_invoice_id(
+            fel_row_id,
+            market=market,
+        )
         audit_status = str((audit or {}).get("status") or "").strip().lower()
         if audit_status != "sent":
             raise ValueError(
