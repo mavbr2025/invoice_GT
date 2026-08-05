@@ -183,3 +183,69 @@ def test_resolve_customer_by_name_matches_sa_to_sociedad_anonima() -> None:
         "number": "C00058",
         "displayName": "SUPER AUTO REPUESTOS, SOCIEDAD ANONIMA",
     }
+
+
+def test_resolve_customer_by_name_scopes_exact_legal_match_to_country() -> None:
+    class CustomerClient(BusinessCentralClient):
+        def get_entities(self, entity_name, *, top=None, filters=None, company_id=None, market=None):
+            assert entity_name == "customers"
+            return {
+                "value": [
+                    {
+                        "id": "costa-rica-customer",
+                        "number": "C00094",
+                        "displayName": "MAGMA AUTOMOTIVE DEALERSHIP S.A.",
+                        "country": "CR",
+                    },
+                    {
+                        "id": "el-salvador-customer",
+                        "number": "C00096",
+                        "displayName": (
+                            "MAGMA AUTOMOTIVE DEALERSHIP, "
+                            "SOCIEDAD ANONIMA DE CAPITAL VARIABLE"
+                        ),
+                        "country": "SV",
+                    },
+                ]
+            }
+
+    client = CustomerClient(make_settings())
+
+    assert client.resolve_customer_by_name(
+        "MAGMA AUTOMOTIVE DEALERSHIP S.A. DE C.V.",
+        market="GT",
+        country_code="SV",
+        allow_contained_match=False,
+    ) == {
+        "id": "el-salvador-customer",
+        "number": "C00096",
+        "displayName": "MAGMA AUTOMOTIVE DEALERSHIP, SOCIEDAD ANONIMA DE CAPITAL VARIABLE",
+        "country": "SV",
+    }
+
+
+def test_resolve_customer_by_name_exact_only_rejects_a_weak_contained_match() -> None:
+    class CustomerClient(BusinessCentralClient):
+        def get_entities(self, entity_name, *, top=None, filters=None, company_id=None, market=None):
+            return {
+                "value": [
+                    {
+                        "id": "customer-1",
+                        "number": "C00094",
+                        "displayName": "MAGMA AUTOMOTIVE DEALERSHIP S.A.",
+                        "country": "CR",
+                    }
+                ]
+            }
+
+    client = CustomerClient(make_settings())
+
+    assert (
+        client.resolve_customer_by_name(
+            "MAGMA AUTOMOTIVE DEALERSHIP EL SALVADOR",
+            market="GT",
+            country_code="CR",
+            allow_contained_match=False,
+        )
+        is None
+    )

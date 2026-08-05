@@ -9,6 +9,7 @@ from webhook_bridge.main import app
 
 
 PAYLOAD_FIELD_ID = "5e825df5-9a5e-45f8-87cf-0b1daa16b38f"
+DESTINATION_COUNTRY_FIELD_ID = "9678e944-701a-4947-b4d1-24c699a45832"
 
 
 def _task(*, payload: dict | None = None) -> dict:
@@ -31,7 +32,16 @@ def _task(*, payload: dict | None = None) -> dict:
         "name": "LGDCH91C5VA702240(DRYRUN TEST)",
         "list": {"id": "901707774763"},
         "custom_fields": [
-            {"id": PAYLOAD_FIELD_ID, "name": "Invoice Payload", "value": json.dumps(payload)}
+            {"id": PAYLOAD_FIELD_ID, "name": "Invoice Payload", "value": json.dumps(payload)},
+            {
+                "id": DESTINATION_COUNTRY_FIELD_ID,
+                "name": "Destination Country",
+                "type": "drop_down",
+                "value": 0,
+                "type_config": {
+                    "options": [{"id": "gt-option", "orderindex": 0, "name": "Guatemala"}]
+                },
+            },
         ],
     }
 
@@ -43,13 +53,23 @@ class _BC:
         self.posted = False
         self.stamped = False
 
-    def resolve_customer_by_name(self, customer_name: str, *, market: str):
-        assert customer_name.startswith("MAGNA")
+    def resolve_customer_by_name(
+        self,
+        customer_name: str,
+        *,
+        market: str,
+        country_code: str | None = None,
+        allow_contained_match: bool = True,
+    ):
+        assert customer_name.startswith("magna")
         assert market == "GT"
+        assert country_code == "GT"
+        assert allow_contained_match is False
         return {
             "id": "customer-id",
             "number": "C00095",
             "displayName": "MAGNA MOTORS GUATEMALA SOCIEDAD ANONIMA",
+            "country": "GT",
             "currencyCode": "USD",
             "paymentTermsId": "term-30",
         }
@@ -124,6 +144,8 @@ def test_preview_builds_a_task_idempotent_bc_invoice(monkeypatch) -> None:
     assert preview["proposed_bc_payload"]["externalDocumentNumber"] == "MTLXMGN-316-INT"
     assert preview["proposed_bc_payload"]["customerPurchaseOrderReference"] == "LGDCH91C5VA702240"
     assert preview["proposed_bc_payload"]["invoiceDate"] == "2026-07-11"
+    assert preview["customer"]["country_code"] == "GT"
+    assert preview["destination_country"] == {"name": "Guatemala", "code": "GT"}
     assert preview["proposed_bc_line_payloads"][1] == {
         "lineType": "Item",
         "lineObjectNumber": "INT000000031",
@@ -146,6 +168,99 @@ def test_preview_rejects_a_payload_for_another_task() -> None:
 
     assert result["status"] == "invalid_invoice_payload"
     assert "does not match" in result["message"]
+
+
+def test_preview_blocks_when_destination_country_is_missing() -> None:
+    task = _task()
+    task["custom_fields"] = [
+        field for field in task["custom_fields"] if field["id"] != DESTINATION_COUNTRY_FIELD_ID
+    ]
+
+    result = prepare_inspection_invoice_preview(task=task, bc_client=_BC())
+
+    assert result["status"] == "missing_destination_country"
+
+
+def test_preview_blocks_when_stable_customer_has_the_wrong_country() -> None:
+    task = _task()
+    payload = json.loads(task["custom_fields"][0]["value"])
+    payload["customer_id"] = "wrong-customer-id"
+    task["custom_fields"][0]["value"] = json.dumps(payload)
+
+    class WrongCountryBC(_BC):
+        def get_customer_by_id(self, customer_id: str, *, market: str):
+            assert customer_id == "wrong-customer-id"
+            return {
+                "id": customer_id,
+                "number": "C00094",
+                "displayName": "MAGMA AUTOMOTIVE DEALERSHIP S.A.",
+                "country": "CR",
+                "currencyCode": "USD",
+                "paymentTermsId": "term-30",
+            }
+
+    result = prepare_inspection_invoice_preview(task=task, bc_client=WrongCountryBC())
+
+    assert result["status"] == "customer_country_mismatch"
+    assert "C00094 belongs to CR" in result["message"]
+
+
+def test_preview_blocks_when_fel_country_disagrees_with_clickup() -> None:
+    class WrongFelCountryBC(_BC):
+        def get_customer_invoicing_by_number(self, number: str, *, market: str):
+            return {"felCountryReady": True, "resolvedFelCountryCode": "CR"}
+
+    result = prepare_inspection_invoice_preview(task=_task(), bc_client=WrongFelCountryBC())
+
+    assert result["status"] == "customer_fel_country_mismatch"
+    assert "is CR" in result["message"]
+
+
+def test_preview_resolves_el_salvador_customer_without_weak_containment() -> None:
+    task = _task()
+    payload = json.loads(task["custom_fields"][0]["value"])
+    payload["customer_name"] = "MAGMA AUTOMOTIVE DEALERSHIP, S.A. DE C.V. EL SALVADOR"
+    task["custom_fields"][0]["value"] = json.dumps(payload)
+    destination_field = task["custom_fields"][1]
+    destination_field["value"] = 1
+    destination_field["type_config"]["options"] = [
+        {"id": "sv-option", "orderindex": 1, "name": "El Salvador"}
+    ]
+
+    class ElSalvadorBC(_BC):
+        def resolve_customer_by_name(
+            self,
+            customer_name: str,
+            *,
+            market: str,
+            country_code: str | None = None,
+            allow_contained_match: bool = True,
+        ):
+            assert customer_name == "magma automotive dealership s a de c v"
+            assert country_code == "SV"
+            assert allow_contained_match is False
+            return {
+                "id": "el-salvador-customer",
+                "number": "C00096",
+                "displayName": (
+                    "MAGMA AUTOMOTIVE DEALERSHIP, "
+                    "SOCIEDAD ANONIMA DE CAPITAL VARIABLE"
+                ),
+                "country": "SV",
+                "currencyCode": "USD",
+                "paymentTermsId": "term-30",
+            }
+
+        def get_customer_invoicing_by_number(self, number: str, *, market: str):
+            assert number == "C00096"
+            return {"felCountryReady": True, "resolvedFelCountryCode": "SV"}
+
+    result = prepare_inspection_invoice_preview(task=task, bc_client=ElSalvadorBC())
+
+    assert result["status"] == "dry_run_ready"
+    assert result["customer"]["number"] == "C00096"
+    assert result["customer"]["country_code"] == "SV"
+    assert result["destination_country"] == {"name": "El Salvador", "code": "SV"}
 
 
 def test_issue_creates_posts_and_stamps_after_preflight(monkeypatch) -> None:

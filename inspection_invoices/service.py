@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import os
+import re
 import time
+import unicodedata
 from dataclasses import asdict
 from datetime import date
 from typing import Any
@@ -16,6 +18,37 @@ from inspection_invoices.canonical import (
 
 
 DEFAULT_MAGNA_INSPECTIONS_LIST_ID = "901707774763"
+DEFAULT_DESTINATION_COUNTRY_FIELD_ID = "9678e944-701a-4947-b4d1-24c699a45832"
+
+_COUNTRY_CODE_BY_ALIAS = {
+    "argentina": "AR",
+    "belize": "BZ",
+    "bolivia": "BO",
+    "brasil": "BR",
+    "brazil": "BR",
+    "canada": "CA",
+    "chile": "CL",
+    "colombia": "CO",
+    "costa rica": "CR",
+    "ecuador": "EC",
+    "el salvador": "SV",
+    "estados unidos": "US",
+    "guatemala": "GT",
+    "honduras": "HN",
+    "mexico": "MX",
+    "nicaragua": "NI",
+    "panama": "PA",
+    "paraguay": "PY",
+    "peru": "PE",
+    "puerto rico": "PR",
+    "republica dominicana": "DO",
+    "salvador": "SV",
+    "united states": "US",
+    "united states of america": "US",
+    "uruguay": "UY",
+    "usa": "US",
+    "venezuela": "VE",
+}
 
 
 def prepare_inspection_invoice_preview(
@@ -63,11 +96,73 @@ def prepare_inspection_invoice_preview(
             market=market,
         )
 
-    customer = _resolve_customer(payload=payload, bc_client=bc_client, market=market)
+    destination = _resolve_task_destination_country(task)
+    if not destination["name"]:
+        return _blocked(
+            "missing_destination_country",
+            "ClickUp Destination Country is required before an inspection invoice can be issued.",
+            task,
+            payload=payload,
+            market=market,
+        )
+    if not destination["code"]:
+        return _blocked(
+            "unsupported_destination_country",
+            f"ClickUp Destination Country {destination['name']!r} could not be mapped to an ISO country code.",
+            task,
+            payload=payload,
+            market=market,
+        )
+
+    customer_lookup_name = _strip_destination_country_suffix(
+        payload.customer_name,
+        country_name=str(destination["name"]),
+        country_code=str(destination["code"]),
+    )
+    try:
+        customer = _resolve_customer(
+            payload=payload,
+            bc_client=bc_client,
+            market=market,
+            expected_country_code=str(destination["code"]),
+            customer_lookup_name=customer_lookup_name,
+        )
+    except ValueError as exc:
+        return _blocked(
+            "ambiguous_bc_customer",
+            str(exc),
+            task,
+            payload=payload,
+            market=market,
+        )
     if not customer:
         return _blocked(
             "missing_bc_customer",
-            f"Business Central customer {payload.customer_name!r} was not found in market {market}.",
+            (
+                f"Business Central customer {payload.customer_name!r} was not found in market {market} "
+                f"with country {destination['code']}."
+            ),
+            task,
+            payload=payload,
+            market=market,
+        )
+
+    customer_country_code = _customer_country_code(customer)
+    if not customer_country_code:
+        return _blocked(
+            "missing_bc_customer_country",
+            f"BC customer {customer.get('number') or customer.get('id')} does not have a country code.",
+            task,
+            payload=payload,
+            market=market,
+        )
+    if customer_country_code != destination["code"]:
+        return _blocked(
+            "customer_country_mismatch",
+            (
+                f"BC customer {customer.get('number') or customer.get('id')} belongs to {customer_country_code}, "
+                f"but ClickUp Destination Country is {destination['name']} ({destination['code']})."
+            ),
             task,
             payload=payload,
             market=market,
@@ -94,6 +189,19 @@ def prepare_inspection_invoice_preview(
     fel = _validate_gt_customer_fel(customer=customer, bc_client=bc_client, market=market)
     if fel["status"] != "ready":
         return _blocked(fel["status"], fel["message"], task, payload=payload, market=market)
+    fel_country_code = str(fel.get("resolved_fel_country") or "").strip().upper()
+    if fel_country_code and fel_country_code != destination["code"]:
+        return _blocked(
+            "customer_fel_country_mismatch",
+            (
+                f"BC FEL country for customer {customer.get('number') or customer.get('id')} is "
+                f"{fel_country_code}, but ClickUp Destination Country is {destination['name']} "
+                f"({destination['code']})."
+            ),
+            task,
+            payload=payload,
+            market=market,
+        )
 
     item = bc_client.resolve_item_by_number(payload.bc_item, market=market)
     if not item:
@@ -167,8 +275,10 @@ def prepare_inspection_invoice_preview(
             "id": customer.get("id"),
             "number": customer_number or None,
             "name": customer.get("displayName") or customer.get("name"),
+            "country_code": customer_country_code,
             "payment_terms_id": payment_terms_id,
         },
+        "destination_country": destination,
         "item": {"id": item.get("id"), "number": item.get("number") or payload.bc_item},
         "payload": _payload_summary(payload),
         "proposed_bc_payload": header_payload,
@@ -241,7 +351,12 @@ def issue_inspection_invoice(
 
 
 def _resolve_customer(
-    *, payload: InspectionInvoicePayload, bc_client: BusinessCentralClient, market: str
+    *,
+    payload: InspectionInvoicePayload,
+    bc_client: BusinessCentralClient,
+    market: str,
+    expected_country_code: str,
+    customer_lookup_name: str,
 ) -> dict[str, Any] | None:
     if payload.customer_id:
         customer = bc_client.get_customer_by_id(payload.customer_id, market=market)
@@ -256,7 +371,12 @@ def _resolve_customer(
             return rows[0]
         if len(rows) > 1:
             raise ValueError(f"More than one BC customer matched {payload.customer_number}.")
-    return bc_client.resolve_customer_by_name(payload.customer_name, market=market)
+    return bc_client.resolve_customer_by_name(
+        customer_lookup_name,
+        market=market,
+        country_code=expected_country_code,
+        allow_contained_match=False,
+    )
 
 
 def _validate_gt_customer_fel(
@@ -340,6 +460,94 @@ def _wait_for_stamp(*, bc_client: BusinessCentralClient, invoice_number: str, ma
 
 def _payload_field_id() -> str:
     return _env("INSPECTION_INVOICE_PAYLOAD_FIELD_ID", "5e825df5-9a5e-45f8-87cf-0b1daa16b38f")
+
+
+def _resolve_task_destination_country(task: dict[str, Any]) -> dict[str, str | None]:
+    field_ids = _env_csv(
+        "INSPECTION_INVOICE_DESTINATION_COUNTRY_FIELD_IDS",
+        (DEFAULT_DESTINATION_COUNTRY_FIELD_ID,),
+    )
+    field_names = _env_csv(
+        "INSPECTION_INVOICE_DESTINATION_COUNTRY_FIELD_NAMES",
+        ("Destination Country", "Country of Destination"),
+    )
+    fields = list(task.get("custom_fields") or [])
+    candidates = [field for field in fields if str(field.get("id") or "") in field_ids]
+    if not candidates:
+        normalized_names = {_normalize_match_text(name) for name in field_names}
+        candidates = [
+            field
+            for field in fields
+            if _normalize_match_text(str(field.get("name") or "")) in normalized_names
+        ]
+    for field in candidates:
+        country_name = _resolve_clickup_field_text(field)
+        if country_name:
+            return {"name": country_name, "code": _country_code(country_name)}
+    return {"name": None, "code": None}
+
+
+def _resolve_clickup_field_text(field: dict[str, Any]) -> str | None:
+    value = field.get("value")
+    if value in (None, ""):
+        return None
+    if field.get("type") == "drop_down":
+        for option in (field.get("type_config") or {}).get("options", []):
+            if option.get("id") == value or option.get("orderindex") == value:
+                return str(option.get("name") or "").strip() or None
+            if str(option.get("id")) == str(value) or str(option.get("orderindex")) == str(value):
+                return str(option.get("name") or "").strip() or None
+    return str(value).strip() or None
+
+
+def _country_code(value: str) -> str | None:
+    normalized = _normalize_match_text(value)
+    if len(normalized) == 2 and normalized.isalpha():
+        return normalized.upper()
+    return _COUNTRY_CODE_BY_ALIAS.get(normalized)
+
+
+def _strip_destination_country_suffix(customer_name: str, *, country_name: str, country_code: str) -> str:
+    normalized_name = _normalize_match_text(customer_name)
+    aliases = {
+        alias
+        for alias, code in _COUNTRY_CODE_BY_ALIAS.items()
+        if code == country_code
+    }
+    aliases.add(_normalize_match_text(country_name))
+    for alias in sorted((item for item in aliases if item), key=len, reverse=True):
+        if normalized_name.endswith(f" {alias}"):
+            return normalized_name[: -(len(alias) + 1)].strip()
+    return normalized_name
+
+
+def _customer_country_code(customer: dict[str, Any]) -> str:
+    for candidate in (
+        customer.get("country"),
+        customer.get("countryCode"),
+        customer.get("countryRegionCode"),
+        (customer.get("address") or {}).get("countryLetterCode")
+        if isinstance(customer.get("address"), dict)
+        else None,
+    ):
+        normalized = str(candidate or "").strip().upper()
+        if normalized:
+            return normalized
+    return ""
+
+
+def _normalize_match_text(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", value or "").encode("ascii", "ignore").decode("ascii")
+    normalized = re.sub(r"[^a-zA-Z0-9]+", " ", normalized).lower()
+    return " ".join(normalized.split())
+
+
+def _env_csv(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    values = tuple(item.strip() for item in raw_value.split(",") if item.strip())
+    return values or default
 
 
 def _env(name: str, default: str) -> str:

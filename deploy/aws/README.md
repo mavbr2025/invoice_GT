@@ -62,6 +62,10 @@ with shipment-charge mappings:
 Keep `INSPECTION_INVOICE_WEBHOOK_APPLY=false` for the first call. The route reads
 the Magna task's `Invoice Payload` field, validates the customer/item/FEL state,
 and returns the proposed BC header and lines without changing either system.
+Inspection issuance also requires ClickUp `Destination Country`. Name-only
+customer resolution is scoped to that country and accepts exact legal-name
+equivalence only. A mismatch between ClickUp, the BC customer card, or the FEL
+country source blocks the operation before a BC invoice is created.
 
 ## Operational Guardrails
 

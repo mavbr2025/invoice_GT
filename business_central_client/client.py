@@ -1268,6 +1268,8 @@ class BusinessCentralClient:
         customer_name: str,
         *,
         market: str | None = None,
+        country_code: str | None = None,
+        allow_contained_match: bool = True,
     ) -> dict[str, Any] | None:
         needle = _normalize_match_text(customer_name)
         if not needle:
@@ -1275,6 +1277,13 @@ class BusinessCentralClient:
         needle_name_keys = _customer_name_match_keys(customer_name)
 
         rows = self.get_entities("customers", top=1000, market=market).get("value", [])
+        expected_country_code = str(country_code or "").strip().upper()
+        if expected_country_code:
+            rows = [
+                row
+                for row in rows
+                if _customer_country_code(row) == expected_country_code
+            ]
         exact_matches = [
             row
             for row in rows
@@ -1287,6 +1296,9 @@ class BusinessCentralClient:
         ]
         if exact_matches:
             return _single_customer_match(exact_matches, customer_name)
+
+        if not allow_contained_match:
+            return None
 
         if len(needle) < 4:
             return None
@@ -1411,6 +1423,9 @@ def _customer_name_match_keys(value: str) -> set[str]:
 def _strip_common_company_suffix(value: str) -> str:
     cleaned = value
     suffixes = (
+        "sociedad anonima de capital variable",
+        "s a de c v",
+        "sa de cv",
         "sociedad anonima",
         "s a",
         "sa",
@@ -1425,6 +1440,22 @@ def _strip_common_company_suffix(value: str) -> str:
                 cleaned = cleaned[: -len(suffix)].strip()
                 changed = True
     return cleaned
+
+
+def _customer_country_code(row: dict[str, Any]) -> str:
+    candidates = (
+        row.get("country"),
+        row.get("countryCode"),
+        row.get("countryRegionCode"),
+        (row.get("address") or {}).get("countryLetterCode")
+        if isinstance(row.get("address"), dict)
+        else None,
+    )
+    for candidate in candidates:
+        normalized = str(candidate or "").strip().upper()
+        if normalized:
+            return normalized
+    return ""
 
 
 def _single_customer_match(rows: list[dict[str, Any]], customer_name: str) -> dict[str, Any]:
