@@ -98,6 +98,7 @@ def storage_invoice_sync_readiness() -> dict[str, Any]:
         "status": "not_ready" if missing_runtime_config else "ready",
         "missing_runtime_config": missing_runtime_config,
         "apply_mode": _env_bool("CLICKUP_STORAGE_INVOICE_WEBHOOK_APPLY", default=False),
+        "customer_email_enabled": should_send_invoice_customer_email(),
         "market": invoice_settings.supported_market,
         "currency": invoice_settings.supported_currency,
         "required_invoice_status": storage_settings.required_invoice_status,
@@ -702,6 +703,15 @@ async def clickup_storage_invoice_sync(
             return result
 
         actions = list(issued.get("completed_stages") or [])
+        if should_send_invoice_customer_email():
+            customer_email_delivery = send_issued_invoice_customer_emails(
+                bc_client=bc,
+                invoice_result=issued,
+                settings=invoice_settings,
+            )
+            issued = {**issued, "customer_email_delivery": customer_email_delivery}
+            actions.append("send_customer_email_from_bc")
+
         delivery = finalize_clickup_issued_invoices(
             clickup=clickup,
             bc_client=bc,

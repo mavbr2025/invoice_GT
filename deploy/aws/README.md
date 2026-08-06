@@ -66,7 +66,8 @@ days, container count, and the configured USD 27 daily rate, and creates one
 supplemental invoice with reference `<CLICKUP-ID>-ALM` using BC item
 `NAT00000034`. It leaves the existing `Facturada` status unchanged. Exact and
 legacy duplicate matches are recovery-only: the bridge reuses a verified
-FEL-stamped invoice for PDF delivery and never creates a second invoice.
+FEL-stamped invoice for native BC email and PDF delivery and never creates a
+second invoice.
 
 Keep `CLICKUP_STORAGE_INVOICE_WEBHOOK_APPLY=false` for the first live call. Use
 `CLICKUP_STORAGE_INVOICE_WEBHOOK_TOKEN` for a dedicated credential, or omit it

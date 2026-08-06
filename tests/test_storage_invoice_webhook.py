@@ -69,7 +69,7 @@ def test_storage_webhook_dry_run_accepts_dedicated_route(monkeypatch) -> None:
 def test_storage_webhook_apply_preserves_facturada_status(monkeypatch) -> None:
     configure_route(monkeypatch)
     monkeypatch.setenv("CLICKUP_STORAGE_INVOICE_WEBHOOK_APPLY", "true")
-    monkeypatch.setenv("CLICKUP_INVOICE_SEND_ENABLED", "false")
+    monkeypatch.setenv("CLICKUP_INVOICE_SEND_ENABLED", "true")
     monkeypatch.setattr(
         "webhook_bridge.main.prepare_clickup_bc_storage_invoice_preview",
         lambda **_kwargs: {"status": "duplicate_invoice"},
@@ -90,6 +90,13 @@ def test_storage_webhook_apply_preserves_facturada_status(monkeypatch) -> None:
         lambda **_kwargs: issued,
     )
     monkeypatch.setattr("webhook_bridge.main.validate_invoice_pdf_field_on_task", lambda _summary: {})
+    email_calls = []
+
+    def send_email(**kwargs):
+        email_calls.append(kwargs)
+        return {"status": "sent", "deliveries": [{"invoice_number": "GTFVR0004450"}]}
+
+    monkeypatch.setattr("webhook_bridge.main.send_issued_invoice_customer_emails", send_email)
     delivery_calls = []
 
     def finalize(**kwargs):
@@ -109,5 +116,7 @@ def test_storage_webhook_apply_preserves_facturada_status(monkeypatch) -> None:
     assert payload["status"] == "processed"
     assert payload["mode"] == "apply"
     assert payload["final_status_update"] is None
+    assert "send_customer_email_from_bc" in payload["action"]
     assert "retain_facturada_status" in payload["action"]
+    assert email_calls[0]["invoice_result"]["finalized_invoices"][0]["invoice_group"] == "ALM"
     assert delivery_calls[0]["mark_status"] is False
