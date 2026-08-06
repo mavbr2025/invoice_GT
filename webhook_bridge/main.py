@@ -28,6 +28,11 @@ from clickup_integration.invoice_sync import (
 )
 from clickup_integration.mapping import summarize_task_for_customer_mapping
 from clickup_integration.matcher import match_clickup_customer_to_bc
+from clickup_integration.storage_invoice_sync import (
+    StorageInvoiceSettings,
+    issue_clickup_bc_storage_invoice,
+    prepare_clickup_bc_storage_invoice_preview,
+)
 from clickup_integration.writeback import prepare_clickup_bc_writeback
 from inspection_invoices.service import (
     issue_inspection_invoice,
@@ -71,6 +76,37 @@ def invoice_sync_readiness() -> dict[str, Any]:
         "ok_finops_status": settings.ok_finops_status,
         "charge_mapping_count": len(settings.charge_mappings),
         "line_type": "Item" if settings.charge_mappings else "Account",
+    }
+
+
+@app.get("/clickup/webhooks/storage-invoice-sync/readiness")
+def storage_invoice_sync_readiness() -> dict[str, Any]:
+    try:
+        invoice_settings = InvoiceAutomationSettings.from_env()
+        storage_settings = StorageInvoiceSettings.from_env()
+    except Exception as exc:
+        logger.exception("Storage invoice bridge readiness check failed.")
+        return {"status": "not_ready", "message": str(exc)}
+    missing_runtime_config = [
+        name for name in ("CLICKUP_ACCESS_TOKEN",) if not os.getenv(name, "").strip()
+    ]
+    if not _storage_invoice_webhook_token():
+        missing_runtime_config.append(
+            "CLICKUP_STORAGE_INVOICE_WEBHOOK_TOKEN or CLICKUP_WEBHOOK_TOKEN"
+        )
+    return {
+        "status": "not_ready" if missing_runtime_config else "ready",
+        "missing_runtime_config": missing_runtime_config,
+        "apply_mode": _env_bool("CLICKUP_STORAGE_INVOICE_WEBHOOK_APPLY", default=False),
+        "market": invoice_settings.supported_market,
+        "currency": invoice_settings.supported_currency,
+        "required_invoice_status": storage_settings.required_invoice_status,
+        "amount_field_id": storage_settings.amount_field_id,
+        "days_field_id": storage_settings.days_field_id,
+        "container_count_field_id": storage_settings.container_count_field_id,
+        "bc_item_number": storage_settings.item_number,
+        "daily_rate": float(storage_settings.daily_rate),
+        "reference_suffix": storage_settings.reference_suffix,
     }
 
 
@@ -582,6 +618,115 @@ async def clickup_invoice_sync(
         raise
     except Exception as exc:  # pragma: no cover - exercised in runtime logs
         logger.exception("ClickUp invoice webhook failed for task_id=%s", task_id)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/clickup/webhooks/storage-invoice-sync")
+@app.post("/clickup/webhooks/storage-invoice-sync{webhook_path:path}")
+@app.post("/clickup/webhooks/storage-invoice-sync/{webhook_path:path}")
+async def clickup_storage_invoice_sync(
+    request: Request,
+    webhook_path: str = "",
+    x_webhook_token: str | None = Header(default=None, alias="X-Webhook-Token"),
+    authorization: str | None = Header(default=None, alias="Authorization"),
+) -> dict[str, Any]:
+    expected_token = _storage_invoice_webhook_token()
+    if not expected_token:
+        raise HTTPException(status_code=500, detail="Storage invoice webhook token is not configured.")
+    provided_token = _extract_webhook_token(
+        x_webhook_token=x_webhook_token,
+        authorization=authorization,
+    )
+    if provided_token != expected_token:
+        raise HTTPException(status_code=401, detail="Invalid webhook token.")
+
+    payload = await _safe_json(request)
+    task_id = extract_task_id(payload) or extract_task_id_from_path(
+        request.url.path,
+        base_path="/clickup/webhooks/storage-invoice-sync",
+    )
+    if not task_id:
+        return {"status": "ignored", "reason": "missing_task_id"}
+
+    try:
+        clickup = ClickUpClient(ClickUpSettings.from_env())
+        bc = BusinessCentralClient(BusinessCentralSettings.from_env())
+        invoice_settings = InvoiceAutomationSettings.from_env()
+        storage_settings = StorageInvoiceSettings.from_env()
+        team_id = _resolve_clickup_team_id(clickup)
+        use_custom_task_ids = _env_bool("CLICKUP_WEBHOOK_CUSTOM_TASK_IDS", default=True)
+        task = _fetch_clickup_task_for_webhook(
+            clickup=clickup,
+            task_id=task_id,
+            custom_task_ids=use_custom_task_ids,
+            team_id=team_id,
+        )
+        if task is None:
+            return {"status": "ignored", "reason": "task_lookup_failed", "task_id": task_id}
+
+        summary = summarize_task_for_customer_mapping(task)
+        preview = prepare_clickup_bc_storage_invoice_preview(
+            clickup_summary=summary,
+            bc_client=bc,
+            invoice_settings=invoice_settings,
+            storage_settings=storage_settings,
+        )
+        apply_mode = _env_bool("CLICKUP_STORAGE_INVOICE_WEBHOOK_APPLY", default=False)
+        preview_status = str(preview.get("status") or "").strip()
+        apply_eligible_statuses = {"dry_run_ready", "duplicate_invoice"}
+        if not apply_mode or preview_status not in apply_eligible_statuses:
+            result = {
+                "status": "processed" if preview_status in apply_eligible_statuses else "blocked",
+                "mode": "dry_run",
+                "task_id": task.get("id"),
+                "result": preview,
+            }
+            _log_webhook_result(task_id=str(task.get("id") or task_id), result=result)
+            return result
+
+        validate_invoice_pdf_field_on_task(summary)
+        issued = issue_clickup_bc_storage_invoice(
+            clickup_summary=summary,
+            bc_client=bc,
+            invoice_settings=invoice_settings,
+            storage_settings=storage_settings,
+        )
+        if issued.get("status") != "applied":
+            result = {
+                "status": "failed",
+                "mode": "apply",
+                "task_id": task.get("id"),
+                "result": issued,
+            }
+            _log_webhook_result(task_id=str(task.get("id") or task_id), result=result)
+            return result
+
+        actions = list(issued.get("completed_stages") or [])
+        delivery = finalize_clickup_issued_invoices(
+            clickup=clickup,
+            bc_client=bc,
+            clickup_summary=summary,
+            invoice_result=issued,
+            settings=invoice_settings,
+            workspace_id=team_id,
+            mark_status=False,
+        )
+        actions.extend(("upload_invoice_pdf", "comment_invoice_details", "retain_facturada_status"))
+        result = {
+            "status": "processed",
+            "mode": "apply",
+            "action": ",".join(actions),
+            "task_id": task.get("id"),
+            "result": issued,
+            "delivery": delivery,
+            "final_status_update": None,
+        }
+        _log_webhook_result(task_id=str(task.get("id") or task_id), result=result)
+        return result
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Storage invoice webhook failed task_id=%s", task_id)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
@@ -1112,6 +1257,14 @@ def _extract_webhook_token(
     if value.lower().startswith("bearer "):
         return value[7:].strip()
     return value
+
+
+def _storage_invoice_webhook_token() -> str:
+    """Use an isolated credential for supplemental Almacenaje invoices when configured."""
+    return (
+        os.getenv("CLICKUP_STORAGE_INVOICE_WEBHOOK_TOKEN", "").strip()
+        or os.getenv("CLICKUP_WEBHOOK_TOKEN", "").strip()
+    )
 
 
 def _apply_clickup_customer_writeback(*, clickup: ClickUpClient, writeback: dict[str, Any]) -> None:

@@ -22,6 +22,7 @@ docker build -f deploy/aws/Dockerfile -t mtm-clickup-invoice-webhook .
 docker run --rm -p 8000:8000 --env-file deploy/aws/env.invoice-webhook.example mtm-clickup-invoice-webhook
 curl http://localhost:8000/healthz
 curl http://localhost:8000/clickup/webhooks/invoice-sync/readiness
+curl http://localhost:8000/clickup/webhooks/storage-invoice-sync/readiness
 curl http://localhost:8000/clickup/webhooks/inspection-invoice-sync/readiness
 ```
 
@@ -50,6 +51,26 @@ Recommended invoice readiness path:
 
 ```text
 /clickup/webhooks/invoice-sync/readiness
+
+## Supplemental Guatemala Almacenaje invoices
+
+Use the isolated route below after the shipment's normal USD invoice status is
+already `Facturada`:
+
+```text
+/clickup/webhooks/storage-invoice-sync
+```
+
+The route reads `Almacenaje al cliente (USD)`, validates it against storage
+days, container count, and the configured USD 27 daily rate, and creates one
+supplemental invoice with reference `<CLICKUP-ID>-ALM` using BC item
+`NAT00000034`. It leaves the existing `Facturada` status unchanged. Exact and
+legacy duplicate matches are recovery-only: the bridge reuses a verified
+FEL-stamped invoice for PDF delivery and never creates a second invoice.
+
+Keep `CLICKUP_STORAGE_INVOICE_WEBHOOK_APPLY=false` for the first live call. Use
+`CLICKUP_STORAGE_INVOICE_WEBHOOK_TOKEN` for a dedicated credential, or omit it
+to fall back to `CLICKUP_WEBHOOK_TOKEN`.
 ```
 
 Inspection invoices use a dedicated route so their JSON payload is never mixed
