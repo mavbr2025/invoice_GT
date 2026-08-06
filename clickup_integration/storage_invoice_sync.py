@@ -20,7 +20,7 @@ DEFAULT_STORAGE_DAYS_FIELD_ID = "edcdf91d-ff83-44a9-a869-dbeaff186ce4"
 DEFAULT_CONTAINER_COUNT_FIELD_ID = "a05a2c81-2079-4467-9bfe-3723537bd350"
 DEFAULT_STORAGE_ITEM_NUMBER = "NAT00000034"
 SUPPLEMENTAL_REFERENCE_FIELD_NAME = "Almacenaje supplemental invoice reference"
-CONTAINER_DAYS_FIELD_NAME = "Almacenaje container-days"
+STORAGE_DAYS_FIELD_NAME = "Almacenaje days per container"
 
 
 @dataclass(frozen=True)
@@ -302,30 +302,41 @@ def _prepare_synthetic_invoice_inputs(
         "type": "short_text",
         "value": validation["supplemental_reference"],
     }
-    custom_fields[CONTAINER_DAYS_FIELD_NAME] = {
-        "id": "storage-container-days",
+    custom_fields[STORAGE_DAYS_FIELD_NAME] = {
+        "id": "storage-days-per-container",
         "type": "number",
-        "value": validation["container_days"],
+        "value": validation["days"],
     }
+    charge_mappings = []
+    amount_per_container = storage_settings.daily_rate * Decimal(validation["days"])
+    for container_index in range(1, int(validation["containers"]) + 1):
+        field_name = f"Almacenaje container {container_index}"
+        field_id = f"storage-container-{container_index}"
+        custom_fields[field_name] = {
+            "id": field_id,
+            "type": "number",
+            "value": float(amount_per_container),
+        }
+        charge_mappings.append(
+            InvoiceChargeMapping(
+                charge_name=field_name,
+                clickup_field_name=field_name,
+                clickup_field_id=field_id,
+                bc_item_number=storage_settings.item_number,
+                bc_description=storage_settings.item_description,
+                tax_group="IVA 12",
+                quantity_basis="container_count",
+            )
+        )
     synthetic_summary = {**clickup_summary, "custom_fields": custom_fields}
     synthetic_settings = replace(
         invoice_settings,
         ready_status=storage_settings.required_invoice_status,
         reference_field_names=(SUPPLEMENTAL_REFERENCE_FIELD_NAME,),
-        charge_mappings=(
-            InvoiceChargeMapping(
-                charge_name=storage_settings.amount_field_name,
-                clickup_field_name=storage_settings.amount_field_name,
-                clickup_field_id=storage_settings.amount_field_id,
-                bc_item_number=storage_settings.item_number,
-                bc_description=storage_settings.item_description,
-                tax_group="IVA 12",
-                quantity_basis="container_count",
-            ),
-        ),
+        charge_mappings=tuple(charge_mappings),
         split_invoice_by_item_prefix=False,
         int_split_customer_numbers=(),
-        shipment_container_count_field_names=(CONTAINER_DAYS_FIELD_NAME,),
+        shipment_container_count_field_names=(STORAGE_DAYS_FIELD_NAME,),
     )
     return synthetic_summary, synthetic_settings
 

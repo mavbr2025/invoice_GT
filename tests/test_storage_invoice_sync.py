@@ -154,7 +154,7 @@ def storage_summary(*, status: str = "Facturada", amount: str = "270") -> dict:
     }
 
 
-def test_storage_preview_accepts_facturada_and_builds_container_day_line() -> None:
+def test_storage_preview_accepts_facturada_and_builds_one_line_per_container() -> None:
     result = prepare_clickup_bc_storage_invoice_preview(
         clickup_summary=storage_summary(),
         bc_client=FakeStorageBCClient(),
@@ -166,10 +166,12 @@ def test_storage_preview_accepts_facturada_and_builds_container_day_line() -> No
     assert result["reference"] == "MTMLXGT-25981-ALM"
     assert result["proposed_bc_payload"]["externalDocumentNumber"] == "MTMLXGT-25981-ALM"
     assert result["invoice_groups"] == ["ALL"]
-    line = result["proposed_bc_line_payloads"][0]
-    assert line["lineObjectNumber"] == "NAT00000034"
-    assert line["quantity"] == 10
-    assert line["unitPrice"] == 27
+    lines = result["proposed_bc_line_payloads"]
+    assert len(lines) == 5
+    assert {line["lineObjectNumber"] for line in lines} == {"NAT00000034"}
+    assert {line["quantity"] for line in lines} == {2}
+    assert {line["unitPrice"] for line in lines} == {27}
+    assert sum(line["quantity"] * line["unitPrice"] for line in lines) == 270
     assert result["storage_validation"]["container_days"] == 10
     assert result["storage_validation"]["warnings"] == [
         {
