@@ -599,7 +599,10 @@ def _find_legacy_storage_invoice(
         market=market,
     )
     for invoice in rows:
-        if _truthy(invoice.get("cancelled")):
+        if _truthy(invoice.get("cancelled")) or _normalize(invoice.get("status")) in {
+            "canceled",
+            "cancelled",
+        }:
             continue
         invoice_total = _decimal_value(invoice.get("totalAmountIncludingTax"))
         if invoice_total is None or abs(invoice_total - expected_total) >= Decimal("0.01"):

@@ -350,6 +350,35 @@ def test_storage_preview_blocks_until_active_split_invoices_are_cancelled() -> N
     ) == 135
 
 
+def test_storage_preview_ignores_split_invoices_with_canceled_status() -> None:
+    invoices = {
+        "MTMLXGT-32186-ALM": {
+            "id": "posted-storage-1",
+            "number": "GTFVR0004523",
+            "status": "Canceled",
+            "externalDocumentNumber": "MTMLXGT-32186-ALM",
+            "customerNumber": "C00102",
+            "totalAmountIncludingTax": 54,
+        },
+        "MTMLXGT-32187-ALM": {
+            "id": "posted-storage-2",
+            "number": "GTFVR0004524",
+            "status": "Canceled",
+            "externalDocumentNumber": "MTMLXGT-32187-ALM",
+            "customerNumber": "C00102",
+            "totalAmountIncludingTax": 81,
+        },
+    }
+    result = prepare_clickup_bc_storage_invoice_preview(
+        clickup_summary=aggregated_storage_summary(),
+        bc_client=FakeStorageBCClient(invoices_by_reference=invoices),
+        invoice_settings=invoice_settings(),
+    )
+
+    assert result["status"] == "dry_run_ready"
+    assert result["reference"] == "MTMLXGT-26217-ALM"
+
+
 def test_storage_preview_blocks_amount_mismatch() -> None:
     result = prepare_clickup_bc_storage_invoice_preview(
         clickup_summary=storage_summary(amount="269"),
