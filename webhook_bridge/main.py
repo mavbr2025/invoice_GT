@@ -30,6 +30,7 @@ from clickup_integration.mapping import summarize_task_for_customer_mapping
 from clickup_integration.matcher import match_clickup_customer_to_bc
 from clickup_integration.storage_invoice_sync import (
     StorageInvoiceSettings,
+    build_clickup_storage_invoice_context,
     issue_clickup_bc_storage_invoice,
     prepare_clickup_bc_storage_invoice_preview,
 )
@@ -105,6 +106,9 @@ def storage_invoice_sync_readiness() -> dict[str, Any]:
         "amount_field_id": storage_settings.amount_field_id,
         "days_field_id": storage_settings.days_field_id,
         "container_count_field_id": storage_settings.container_count_field_id,
+        "cut_field_id": storage_settings.cut_field_id,
+        "invoiced_field_id": storage_settings.invoiced_field_id,
+        "aggregation_mode": "parent_subtasks",
         "bc_item_number": storage_settings.item_number,
         "daily_rate": float(storage_settings.daily_rate),
         "reference_suffix": storage_settings.reference_suffix,
@@ -665,7 +669,35 @@ async def clickup_storage_invoice_sync(
         if task is None:
             return {"status": "ignored", "reason": "task_lookup_failed", "task_id": task_id}
 
-        summary = summarize_task_for_customer_mapping(task)
+        parent_value = task.get("parent")
+        parent_id = (
+            str(parent_value.get("id") or "").strip()
+            if isinstance(parent_value, dict)
+            else str(parent_value or "").strip()
+        )
+        invoice_task_id = parent_id or str(task.get("id") or "").strip()
+        invoice_task = _fetch_clickup_task_for_webhook(
+            clickup=clickup,
+            task_id=invoice_task_id,
+            custom_task_ids=False,
+            team_id=team_id,
+            include_subtasks=True,
+        )
+        if parent_id and invoice_task is None:
+            result = {
+                "status": "blocked",
+                "mode": "dry_run",
+                "reason": "parent_lookup_failed",
+                "task_id": task.get("id"),
+                "parent_task_id": parent_id,
+            }
+            _log_webhook_result(task_id=str(task.get("id") or task_id), result=result)
+            return result
+        summary = build_clickup_storage_invoice_context(
+            requested_task=task,
+            invoice_task=invoice_task or task,
+            storage_settings=storage_settings,
+        )
         preview = prepare_clickup_bc_storage_invoice_preview(
             clickup_summary=summary,
             bc_client=bc,
@@ -680,6 +712,7 @@ async def clickup_storage_invoice_sync(
                 "status": "processed" if preview_status in apply_eligible_statuses else "blocked",
                 "mode": "dry_run",
                 "task_id": task.get("id"),
+                "invoice_owner_task_id": summary.get("task_id"),
                 "result": preview,
             }
             _log_webhook_result(task_id=str(task.get("id") or task_id), result=result)
@@ -727,6 +760,7 @@ async def clickup_storage_invoice_sync(
             "mode": "apply",
             "action": ",".join(actions),
             "task_id": task.get("id"),
+            "invoice_owner_task_id": summary.get("task_id"),
             "result": issued,
             "delivery": delivery,
             "final_status_update": None,
@@ -1049,6 +1083,7 @@ def _fetch_clickup_task_for_webhook(
     task_id: str,
     custom_task_ids: bool,
     team_id: str | None,
+    include_subtasks: bool = False,
 ) -> dict[str, Any] | None:
     attempts: list[tuple[bool, str | None]] = []
     primary_team_id = team_id or clickup.settings.default_workspace_id
@@ -1070,7 +1105,7 @@ def _fetch_clickup_task_for_webhook(
                 task_id,
                 custom_task_ids=attempt_custom_ids,
                 team_id=attempt_team_id,
-                include_subtasks=False,
+                include_subtasks=include_subtasks,
             )
         except Exception:
             logger.exception(

@@ -5,15 +5,22 @@ from types import SimpleNamespace
 from clickup_integration.invoice_sync import InvoiceAutomationSettings
 from clickup_integration.storage_invoice_sync import (
     StorageInvoiceSettings,
+    build_clickup_storage_invoice_context,
     issue_clickup_bc_storage_invoice,
     prepare_clickup_bc_storage_invoice_preview,
 )
 
 
 class FakeStorageBCClient:
-    def __init__(self, *, legacy_invoice: dict | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        legacy_invoice: dict | None = None,
+        invoices_by_reference: dict[str, dict] | None = None,
+    ) -> None:
         self.settings = SimpleNamespace()
         self.legacy_invoice = legacy_invoice
+        self.invoices_by_reference = invoices_by_reference or {}
 
     def find_entities(self, entity_name: str, *, filters: str, top: int = 1, company_id=None, market=None):
         assert market == "GT"
@@ -29,6 +36,9 @@ class FakeStorageBCClient:
                 }
             ]
         assert entity_name == "salesInvoices"
+        for reference, invoice in self.invoices_by_reference.items():
+            if f"externalDocumentNumber eq '{reference}'" in filters:
+                return [invoice]
         if "externalDocumentNumber eq 'MTMLXGT-25981-ALM'" in filters:
             return []
         if "externalDocumentNumber eq 'MTMLXGT-25981'" in filters and self.legacy_invoice:
@@ -154,6 +164,99 @@ def storage_summary(*, status: str = "Facturada", amount: str = "270") -> dict:
     }
 
 
+def aggregated_storage_summary() -> dict:
+    summary = storage_summary(amount="108")
+    summary["task_id"] = "86e1k2ptx"
+    summary["custom_id"] = "MTMLXGT-26217"
+    summary["name"] = "PO I-GM26-035 - MTMLXGT-26217"
+    summary["storage_context_mode"] = "parent_subtasks"
+    summary["storage_entries"] = [
+        {
+            "task_id": "86e2rk9b1",
+            "custom_id": "MTMLXGT-32186",
+            "container": "FFAU6506597",
+            "amount": 54,
+            "days": 2,
+            "containers": 1,
+            "cut": True,
+            "amount_formula_state": "failed",
+        },
+        {
+            "task_id": "86e2rk9b9",
+            "custom_id": "MTMLXGT-32187",
+            "container": "ONEU0145016",
+            "amount": 81,
+            "days": 3,
+            "containers": 1,
+            "cut": True,
+            "amount_formula_state": "failed",
+        },
+    ]
+    return summary
+
+
+def raw_field(field_id: str, name: str, value, field_type: str = "number") -> dict:
+    return {"id": field_id, "name": name, "type": field_type, "value": value}
+
+
+def test_storage_context_moves_child_request_to_parent_and_collects_siblings() -> None:
+    requested = {
+        "id": "86e2rk9b9",
+        "custom_id": "MTMLXGT-32187",
+        "name": "ONEU0145016",
+        "parent": "86e1k2ptx",
+        "status": {"status": "Facturada"},
+        "custom_fields": [],
+    }
+    parent = {
+        "id": "86e1k2ptx",
+        "custom_id": "MTMLXGT-26217",
+        "name": "PO I-GM26-035 - MTMLXGT-26217",
+        "status": {"status": "Facturada"},
+        "custom_fields": [],
+        "subtasks": [
+            {
+                "id": "86e2rk9b1",
+                "custom_id": "MTMLXGT-32186",
+                "name": "FFAU6506597",
+                "status": {"status": "Facturada"},
+                "custom_fields": [
+                    raw_field("16edb6b2-ba0c-4a1e-94f0-f3f511d2f647", "Almacenaje al cliente (USD)", 54),
+                    raw_field("edcdf91d-ff83-44a9-a869-dbeaff186ce4", "Días de almacenaje incurridos", 2),
+                    raw_field("a05a2c81-2079-4467-9bfe-3723537bd350", "Number of Containers", 1),
+                    raw_field("f8bb0632-c52d-43ed-b9a8-02c8d3635e9a", "Corte de almacenaje", True, "checkbox"),
+                ],
+            },
+            {
+                "id": "86e2rk9b9",
+                "custom_id": "MTMLXGT-32187",
+                "name": "ONEU0145016",
+                "status": {"status": "Facturada"},
+                "custom_fields": [
+                    raw_field("16edb6b2-ba0c-4a1e-94f0-f3f511d2f647", "Almacenaje al cliente (USD)", 81),
+                    raw_field("edcdf91d-ff83-44a9-a869-dbeaff186ce4", "Días de almacenaje incurridos", 3),
+                    raw_field("a05a2c81-2079-4467-9bfe-3723537bd350", "Number of Containers", 1),
+                    raw_field("f8bb0632-c52d-43ed-b9a8-02c8d3635e9a", "Corte de almacenaje", True, "checkbox"),
+                ],
+            },
+        ],
+    }
+
+    context = build_clickup_storage_invoice_context(
+        requested_task=requested,
+        invoice_task=parent,
+        storage_settings=StorageInvoiceSettings(),
+    )
+
+    assert context["task_id"] == "86e1k2ptx"
+    assert context["custom_id"] == "MTMLXGT-26217"
+    assert context["storage_requested_custom_id"] == "MTMLXGT-32187"
+    assert [(entry["container"], entry["days"], entry["amount"]) for entry in context["storage_entries"]] == [
+        ("FFAU6506597", 2, 54.0),
+        ("ONEU0145016", 3, 81.0),
+    ]
+
+
 def test_storage_preview_accepts_facturada_and_builds_one_line_per_container() -> None:
     result = prepare_clickup_bc_storage_invoice_preview(
         clickup_summary=storage_summary(),
@@ -190,6 +293,61 @@ def test_storage_preview_requires_existing_facturada_status() -> None:
     )
 
     assert result["status"] == "not_previously_invoiced"
+
+
+def test_storage_preview_aggregates_parent_subtasks_with_individual_days() -> None:
+    result = prepare_clickup_bc_storage_invoice_preview(
+        clickup_summary=aggregated_storage_summary(),
+        bc_client=FakeStorageBCClient(),
+        invoice_settings=invoice_settings(),
+    )
+
+    assert result["status"] == "dry_run_ready"
+    assert result["reference"] == "MTMLXGT-26217-ALM"
+    lines = result["proposed_bc_line_payloads"]
+    assert [(line["quantity"], line["unitPrice"]) for line in lines] == [(2, 27), (3, 27)]
+    assert [line["description"] for line in lines] == [
+        "ALMACENAJES EN PUERTO - FFAU6506597",
+        "ALMACENAJES EN PUERTO - ONEU0145016",
+    ]
+    assert sum(line["quantity"] * line["unitPrice"] for line in lines) == 135
+    assert result["storage_validation"]["aggregation_mode"] == "parent_subtasks"
+    assert result["storage_validation"]["container_days"] == 5
+
+
+def test_storage_preview_blocks_until_active_split_invoices_are_cancelled() -> None:
+    invoices = {
+        "MTMLXGT-32186-ALM": {
+            "id": "posted-storage-1",
+            "number": "GTFVR0004523",
+            "externalDocumentNumber": "MTMLXGT-32186-ALM",
+            "customerNumber": "C00102",
+            "totalAmountIncludingTax": 54,
+        },
+        "MTMLXGT-32187-ALM": {
+            "id": "posted-storage-2",
+            "number": "GTFVR0004524",
+            "externalDocumentNumber": "MTMLXGT-32187-ALM",
+            "customerNumber": "C00102",
+            "totalAmountIncludingTax": 81,
+        },
+    }
+    result = prepare_clickup_bc_storage_invoice_preview(
+        clickup_summary=aggregated_storage_summary(),
+        bc_client=FakeStorageBCClient(invoices_by_reference=invoices),
+        invoice_settings=invoice_settings(),
+    )
+
+    assert result["status"] == "replacement_required"
+    assert result["replacement_reference"] == "MTMLXGT-26217-ALM"
+    assert [row["number"] for row in result["invoices_to_cancel"]] == [
+        "GTFVR0004523",
+        "GTFVR0004524",
+    ]
+    assert sum(
+        line["quantity"] * line["unitPrice"]
+        for line in result["proposed_bc_line_payloads"]
+    ) == 135
 
 
 def test_storage_preview_blocks_amount_mismatch() -> None:

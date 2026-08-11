@@ -13,11 +13,14 @@ from clickup_integration.invoice_sync import (
     prepare_clickup_bc_sales_invoice_preview,
 )
 from clickup_integration.mapping import resolve_dropdown_field
+from clickup_integration.mapping import summarize_task_for_customer_mapping
 
 
 DEFAULT_STORAGE_AMOUNT_FIELD_ID = "16edb6b2-ba0c-4a1e-94f0-f3f511d2f647"
 DEFAULT_STORAGE_DAYS_FIELD_ID = "edcdf91d-ff83-44a9-a869-dbeaff186ce4"
 DEFAULT_CONTAINER_COUNT_FIELD_ID = "a05a2c81-2079-4467-9bfe-3723537bd350"
+DEFAULT_STORAGE_CUT_FIELD_ID = "f8bb0632-c52d-43ed-b9a8-02c8d3635e9a"
+DEFAULT_STORAGE_INVOICED_FIELD_ID = "2ead1265-65a3-4409-9f77-2af138421dcb"
 DEFAULT_STORAGE_ITEM_NUMBER = "NAT00000034"
 SUPPLEMENTAL_REFERENCE_FIELD_NAME = "Almacenaje supplemental invoice reference"
 STORAGE_DAYS_FIELD_NAME = "Almacenaje days per container"
@@ -32,6 +35,8 @@ class StorageInvoiceSettings:
     days_field_name: str = "Días de almacenaje incurridos"
     container_count_field_id: str = DEFAULT_CONTAINER_COUNT_FIELD_ID
     container_count_field_name: str = "Number of Containers"
+    cut_field_id: str = DEFAULT_STORAGE_CUT_FIELD_ID
+    invoiced_field_id: str = DEFAULT_STORAGE_INVOICED_FIELD_ID
     item_number: str = DEFAULT_STORAGE_ITEM_NUMBER
     item_description: str = "ALMACENAJES EN PUERTO"
     daily_rate: Decimal = Decimal("27")
@@ -68,6 +73,14 @@ class StorageInvoiceSettings:
                 "CLICKUP_STORAGE_CONTAINER_COUNT_FIELD_NAME", "Number of Containers"
             ).strip()
             or "Number of Containers",
+            cut_field_id=os.getenv(
+                "CLICKUP_STORAGE_CUT_FIELD_ID", DEFAULT_STORAGE_CUT_FIELD_ID
+            ).strip()
+            or DEFAULT_STORAGE_CUT_FIELD_ID,
+            invoiced_field_id=os.getenv(
+                "CLICKUP_STORAGE_INVOICED_FIELD_ID", DEFAULT_STORAGE_INVOICED_FIELD_ID
+            ).strip()
+            or DEFAULT_STORAGE_INVOICED_FIELD_ID,
             item_number=os.getenv(
                 "CLICKUP_STORAGE_BC_ITEM_NUMBER", DEFAULT_STORAGE_ITEM_NUMBER
             ).strip()
@@ -80,6 +93,82 @@ class StorageInvoiceSettings:
             reference_suffix=os.getenv("CLICKUP_STORAGE_REFERENCE_SUFFIX", "ALM").strip()
             or "ALM",
         )
+
+
+def build_clickup_storage_invoice_context(
+    *,
+    requested_task: dict[str, Any],
+    invoice_task: dict[str, Any],
+    storage_settings: StorageInvoiceSettings | None = None,
+) -> dict[str, Any]:
+    """Build one parent-owned invoice context from per-container ClickUp subtasks."""
+    config = storage_settings or StorageInvoiceSettings.from_env()
+    requested_summary = summarize_task_for_customer_mapping(requested_task)
+    invoice_summary = summarize_task_for_customer_mapping(invoice_task)
+    entries: list[dict[str, Any]] = []
+    for child in invoice_task.get("subtasks") or []:
+        child_summary = summarize_task_for_customer_mapping(child)
+        fields = child_summary.get("custom_fields") or {}
+        amount_field = _field_by_id_or_name(
+            fields, field_id=config.amount_field_id, field_name=config.amount_field_name
+        )
+        days_field = _field_by_id_or_name(
+            fields, field_id=config.days_field_id, field_name=config.days_field_name
+        )
+        count_field = _field_by_id_or_name(
+            fields,
+            field_id=config.container_count_field_id,
+            field_name=config.container_count_field_name,
+        )
+        cut_field = _field_by_id_or_name(fields, field_id=config.cut_field_id, field_name="")
+        invoiced_field = _field_by_id_or_name(
+            fields, field_id=config.invoiced_field_id, field_name=""
+        )
+        amount = _decimal_value((amount_field or {}).get("value"))
+        days = _positive_integral_value((days_field or {}).get("value"))
+        containers = _positive_integral_value((count_field or {}).get("value"))
+        already_invoiced = _truthy((invoiced_field or {}).get("value"))
+        if (
+            not _truthy((cut_field or {}).get("value"))
+            or already_invoiced
+            or amount is None
+            or amount <= 0
+            or days is None
+        ):
+            continue
+        if containers != 1:
+            continue
+        entries.append(
+            {
+                "task_id": child_summary.get("task_id"),
+                "custom_id": child_summary.get("custom_id"),
+                "container": str(child_summary.get("name") or "").strip(),
+                "amount": float(amount),
+                "days": days,
+                "containers": containers,
+                "cut": True,
+                "already_marked_invoiced": already_invoiced,
+                "amount_formula_state": str(
+                    ((amount_field or {}).get("type_config") or {}).get("calculation_state") or ""
+                ).strip().lower()
+                or None,
+            }
+        )
+
+    requested_has_parent = bool(requested_task.get("parent"))
+    if not entries and not requested_has_parent:
+        return {
+            **requested_summary,
+            "storage_context_mode": "legacy_task",
+            "storage_requested_task_id": requested_summary.get("task_id"),
+        }
+    return {
+        **invoice_summary,
+        "storage_context_mode": "parent_subtasks",
+        "storage_requested_task_id": requested_summary.get("task_id"),
+        "storage_requested_custom_id": requested_summary.get("custom_id"),
+        "storage_entries": entries,
+    }
 
 
 def prepare_clickup_bc_storage_invoice_preview(
@@ -107,6 +196,28 @@ def prepare_clickup_bc_storage_invoice_preview(
         settings=synthetic_settings,
     )
     if preview.get("status") == "dry_run_ready":
+        split_invoices = _find_active_split_storage_invoices(
+            bc_client=bc_client,
+            market=str(preview.get("market") or "GT"),
+            customer_number=preview.get("customer_number"),
+            entries=validation.get("entries") or [],
+            item_number=config.item_number,
+            reference_suffix=config.reference_suffix,
+        )
+        if split_invoices:
+            return {
+                **preview,
+                "status": "replacement_required",
+                "message": (
+                    "Active per-container Almacenaje invoices must be cancelled before the "
+                    "consolidated parent invoice can be issued."
+                ),
+                "invoice_group": "ALM",
+                "replacement_reference": validation["supplemental_reference"],
+                "invoices_to_cancel": split_invoices,
+                "storage_validation": validation,
+                "supplemental_invoice": True,
+            }
         legacy_duplicate = _find_legacy_storage_invoice(
             bc_client=bc_client,
             market=str(preview.get("market") or "GT"),
@@ -206,6 +317,31 @@ def _validate_storage_source(
             "task_status": invoice_status,
         }
 
+    entries = clickup_summary.get("storage_entries") or []
+    base_reference = str(
+        clickup_summary.get("custom_id") or clickup_summary.get("task_id") or ""
+    ).strip()
+    if not base_reference:
+        return {
+            "status": "missing_reference",
+            "message": "A ClickUp custom task ID or task ID is required for Almacenaje invoicing.",
+        }
+    if entries:
+        return _validate_storage_entries(
+            entries=entries,
+            invoice_status=invoice_status,
+            base_reference=base_reference,
+            settings=settings,
+        )
+    if clickup_summary.get("storage_context_mode") == "parent_subtasks":
+        return {
+            "status": "missing_storage_entries",
+            "message": (
+                "No uninvoiced per-container subtasks are ready for consolidated Almacenaje billing."
+            ),
+            "base_reference": base_reference,
+        }
+
     amount_field = _field_by_id_or_name(
         custom_fields,
         field_id=settings.amount_field_id,
@@ -251,14 +387,6 @@ def _validate_storage_source(
             "daily_rate": float(settings.daily_rate),
         }
 
-    base_reference = str(
-        clickup_summary.get("custom_id") or clickup_summary.get("task_id") or ""
-    ).strip()
-    if not base_reference:
-        return {
-            "status": "missing_reference",
-            "message": "A ClickUp custom task ID or task ID is required for Almacenaje invoicing.",
-        }
     calculation_state = str(
         ((amount_field or {}).get("type_config") or {}).get("calculation_state") or ""
     ).strip().lower()
@@ -308,14 +436,28 @@ def _prepare_synthetic_invoice_inputs(
         "value": validation["days"],
     }
     charge_mappings = []
-    amount_per_container = storage_settings.daily_rate * Decimal(validation["days"])
-    for container_index in range(1, int(validation["containers"]) + 1):
+    entries = validation.get("entries") or [
+        {
+            "container": f"Container {container_index}",
+            "days": validation["days"],
+            "amount": float(storage_settings.daily_rate * Decimal(validation["days"])),
+        }
+        for container_index in range(1, int(validation["containers"]) + 1)
+    ]
+    for container_index, entry in enumerate(entries, start=1):
         field_name = f"Almacenaje container {container_index}"
         field_id = f"storage-container-{container_index}"
+        quantity_field_name = f"Almacenaje days container {container_index}"
+        quantity_field_id = f"storage-days-container-{container_index}"
         custom_fields[field_name] = {
             "id": field_id,
             "type": "number",
-            "value": float(amount_per_container),
+            "value": entry["amount"],
+        }
+        custom_fields[quantity_field_name] = {
+            "id": quantity_field_id,
+            "type": "number",
+            "value": entry["days"],
         }
         charge_mappings.append(
             InvoiceChargeMapping(
@@ -323,9 +465,15 @@ def _prepare_synthetic_invoice_inputs(
                 clickup_field_name=field_name,
                 clickup_field_id=field_id,
                 bc_item_number=storage_settings.item_number,
-                bc_description=storage_settings.item_description,
+                bc_description=(
+                    f"{storage_settings.item_description} - {entry['container']}"
+                    if entry.get("container")
+                    else storage_settings.item_description
+                ),
                 tax_group="IVA 12",
                 quantity_basis="container_count",
+                quantity_field_name=quantity_field_name,
+                quantity_field_id=quantity_field_id,
             )
         )
     synthetic_summary = {**clickup_summary, "custom_fields": custom_fields}
@@ -339,6 +487,96 @@ def _prepare_synthetic_invoice_inputs(
         shipment_container_count_field_names=(STORAGE_DAYS_FIELD_NAME,),
     )
     return synthetic_summary, synthetic_settings
+
+
+def _validate_storage_entries(
+    *,
+    entries: list[dict[str, Any]],
+    invoice_status: str,
+    base_reference: str,
+    settings: StorageInvoiceSettings,
+) -> dict[str, Any]:
+    seen_containers: set[str] = set()
+    normalized_entries: list[dict[str, Any]] = []
+    warnings: list[dict[str, Any]] = []
+    for entry in entries:
+        container = str(entry.get("container") or "").strip()
+        amount = _decimal_value(entry.get("amount"))
+        days = _positive_integral_value(entry.get("days"))
+        if not container or _normalize(container) in seen_containers:
+            return {
+                "status": "invalid_storage_entries",
+                "message": "Each Almacenaje subtask must identify one unique container.",
+            }
+        seen_containers.add(_normalize(container))
+        expected_amount = settings.daily_rate * Decimal(days or 0)
+        if amount is None or days is None or abs(amount - expected_amount) >= Decimal("0.01"):
+            return {
+                "status": "storage_amount_mismatch",
+                "message": f"Almacenaje for container {container} does not reconcile.",
+                "container": container,
+                "amount": float(amount) if amount is not None else None,
+                "expected_amount": float(expected_amount),
+                "days": days,
+                "daily_rate": float(settings.daily_rate),
+            }
+        normalized = {**entry, "container": container, "amount": float(amount), "days": days}
+        normalized_entries.append(normalized)
+        formula_state = str(entry.get("amount_formula_state") or "").strip().lower()
+        if formula_state and formula_state != "ready":
+            warnings.append(
+                {
+                    "reason": "amount_formula_not_ready",
+                    "container": container,
+                    "calculation_state": formula_state,
+                    "accepted_because": "component_recalculation_matches",
+                }
+            )
+    total = sum(Decimal(str(entry["amount"])) for entry in normalized_entries)
+    container_days = sum(int(entry["days"]) for entry in normalized_entries)
+    return {
+        "status": "passed",
+        "message": "Per-container Almacenaje source values reconcile.",
+        "task_status": invoice_status,
+        "base_reference": base_reference,
+        "supplemental_reference": f"{base_reference}-{settings.reference_suffix}",
+        "amount": float(total),
+        "days": None,
+        "containers": len(normalized_entries),
+        "container_days": container_days,
+        "daily_rate": float(settings.daily_rate),
+        "item_number": settings.item_number,
+        "aggregation_mode": "parent_subtasks",
+        "entries": normalized_entries,
+        "warnings": warnings,
+    }
+
+
+def _find_active_split_storage_invoices(
+    *,
+    bc_client: BusinessCentralClient,
+    market: str,
+    customer_number: str | None,
+    entries: list[dict[str, Any]],
+    item_number: str,
+    reference_suffix: str,
+) -> list[dict[str, Any]]:
+    matches = []
+    for entry in entries:
+        child_reference = str(entry.get("custom_id") or entry.get("task_id") or "").strip()
+        if not child_reference:
+            continue
+        invoice = _find_legacy_storage_invoice(
+            bc_client=bc_client,
+            market=market,
+            base_reference=f"{child_reference}-{reference_suffix}",
+            customer_number=customer_number,
+            item_number=item_number,
+            expected_total=Decimal(str(entry["amount"])),
+        )
+        if invoice:
+            matches.append({**invoice, "container": entry.get("container")})
+    return matches
 
 
 def _find_legacy_storage_invoice(
@@ -361,6 +599,8 @@ def _find_legacy_storage_invoice(
         market=market,
     )
     for invoice in rows:
+        if _truthy(invoice.get("cancelled")):
+            continue
         invoice_total = _decimal_value(invoice.get("totalAmountIncludingTax"))
         if invoice_total is None or abs(invoice_total - expected_total) >= Decimal("0.01"):
             continue
@@ -475,6 +715,12 @@ def _positive_integral_value(value: Any) -> int | None:
 def _env_decimal(name: str, *, default: Decimal) -> Decimal:
     parsed = _decimal_value(os.getenv(name, ""))
     return parsed if parsed is not None and parsed > 0 else default
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().casefold() in {"1", "true", "yes", "si", "sí"}
 
 
 def _normalize(value: Any) -> str:

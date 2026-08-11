@@ -29,6 +29,8 @@ class InvoiceChargeMapping:
     bc_description: str
     tax_group: str | None = None
     quantity_basis: str = "shipment"
+    quantity_field_name: str | None = None
+    quantity_field_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1820,7 +1822,24 @@ def _resolve_invoice_line_quantity(
             )
         }
 
-    quantity = _resolve_container_count(custom_fields=custom_fields, config=config)
+    quantity_field_name = str(charge.get("quantity_field_name") or "").strip()
+    quantity_field_id = str(charge.get("quantity_field_id") or "").strip()
+    if quantity_field_name or quantity_field_id:
+        raw_quantity, _, _ = _present_field_value_and_source(
+            custom_fields,
+            field_name=quantity_field_name,
+            field_id=quantity_field_id,
+        )
+        parsed_quantity = _parse_decimal(raw_quantity)
+        quantity = (
+            int(parsed_quantity)
+            if parsed_quantity is not None
+            and parsed_quantity > 0
+            and parsed_quantity == parsed_quantity.to_integral_value()
+            else None
+        )
+    else:
+        quantity = _resolve_container_count(custom_fields=custom_fields, config=config)
     if quantity is None:
         return {
             "error": (
@@ -1952,6 +1971,8 @@ def _build_mapped_charge_input(
             "source_field_id": source_field_id,
             "tax_group": mapping.tax_group,
             "quantity_basis": mapping.quantity_basis,
+            "quantity_field_name": mapping.quantity_field_name,
+            "quantity_field_id": mapping.quantity_field_id,
         }
 
     amount = _parse_decimal(raw_value)
@@ -1968,6 +1989,8 @@ def _build_mapped_charge_input(
                 "source_field_id": source_field_id,
                 "tax_group": mapping.tax_group,
                 "quantity_basis": mapping.quantity_basis,
+                "quantity_field_name": mapping.quantity_field_name,
+                "quantity_field_id": mapping.quantity_field_id,
                 "error": f"Charge field {source_field or mapping.charge_name} has an invalid numeric value.",
             }
 
@@ -1980,6 +2003,8 @@ def _build_mapped_charge_input(
         "source_field_id": source_field_id,
         "tax_group": mapping.tax_group,
         "quantity_basis": mapping.quantity_basis,
+        "quantity_field_name": mapping.quantity_field_name,
+        "quantity_field_id": mapping.quantity_field_id,
     }
 
 
@@ -2707,6 +2732,8 @@ def load_invoice_charge_mappings(path: str | os.PathLike[str]) -> tuple[InvoiceC
                 bc_description=bc_description,
                 tax_group=tax_group,
                 quantity_basis=quantity_basis,
+                quantity_field_name=str(row.get("quantity_field_name") or "").strip() or None,
+                quantity_field_id=str(row.get("quantity_field_id") or "").strip() or None,
             )
         )
 

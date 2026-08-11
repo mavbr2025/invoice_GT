@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
+from clickup_integration.storage_invoice_sync import StorageInvoiceSettings
 from webhook_bridge.main import app
 
 
@@ -38,7 +39,9 @@ def configure_route(monkeypatch) -> None:
     monkeypatch.setattr("webhook_bridge.main.ClickUpSettings.from_env", lambda: object())
     monkeypatch.setattr("webhook_bridge.main.BusinessCentralSettings.from_env", lambda: object())
     monkeypatch.setattr("webhook_bridge.main.InvoiceAutomationSettings.from_env", lambda: object())
-    monkeypatch.setattr("webhook_bridge.main.StorageInvoiceSettings.from_env", lambda: object())
+    monkeypatch.setattr(
+        "webhook_bridge.main.StorageInvoiceSettings.from_env", StorageInvoiceSettings
+    )
 
 
 def test_storage_webhook_dry_run_accepts_dedicated_route(monkeypatch) -> None:
