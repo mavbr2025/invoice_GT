@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -22,6 +23,8 @@ DEFAULT_CONTAINER_COUNT_FIELD_ID = "a05a2c81-2079-4467-9bfe-3723537bd350"
 DEFAULT_STORAGE_CUT_FIELD_ID = "f8bb0632-c52d-43ed-b9a8-02c8d3635e9a"
 DEFAULT_STORAGE_INVOICED_FIELD_ID = "2ead1265-65a3-4409-9f77-2af138421dcb"
 DEFAULT_STORAGE_ITEM_NUMBER = "NAT00000034"
+DEFAULT_STORAGE_INVOICE_ATTACHMENT_FIELD_ID = "c4994b71-cff2-46a3-b169-08f5019e0a93"
+DEFAULT_INVOICE_TO_CLIENT_FIELD_ID = "5d67859a-1ae0-4cda-9f57-2a89bf1ff259"
 SUPPLEMENTAL_REFERENCE_FIELD_NAME = "Almacenaje supplemental invoice reference"
 STORAGE_DAYS_FIELD_NAME = "Almacenaje days per container"
 
@@ -130,7 +133,6 @@ def build_clickup_storage_invoice_context(
         already_invoiced = _truthy((invoiced_field or {}).get("value"))
         if (
             not _truthy((cut_field or {}).get("value"))
-            or already_invoiced
             or amount is None
             or amount <= 0
             or days is None
@@ -183,6 +185,14 @@ def prepare_clickup_bc_storage_invoice_preview(
     validation = _validate_storage_source(clickup_summary=clickup_summary, settings=config)
     if validation["status"] != "passed":
         return validation
+    validation = _reconcile_storage_invoice_history(
+        clickup_summary=clickup_summary,
+        bc_client=bc_client,
+        validation=validation,
+        settings=config,
+    )
+    if validation["status"] != "passed":
+        return validation
 
     synthetic_summary, synthetic_settings = _prepare_synthetic_invoice_inputs(
         clickup_summary=clickup_summary,
@@ -195,6 +205,12 @@ def prepare_clickup_bc_storage_invoice_preview(
         bc_client=bc_client,
         settings=synthetic_settings,
     )
+    customer_guard = _validate_storage_history_customer(
+        validation=validation,
+        customer_number=preview.get("customer_number"),
+    )
+    if customer_guard:
+        return customer_guard
     if preview.get("status") == "dry_run_ready":
         split_invoices = _find_active_split_storage_invoices(
             bc_client=bc_client,
@@ -413,6 +429,12 @@ def _validate_storage_source(
         "daily_rate": float(settings.daily_rate),
         "item_number": settings.item_number,
         "amount_formula_state": calculation_state or None,
+        "entries": _legacy_storage_entries(
+            custom_fields=custom_fields,
+            days=days,
+            containers=containers,
+            settings=settings,
+        ),
         "warnings": warnings,
     }
 
@@ -550,6 +572,403 @@ def _validate_storage_entries(
         "entries": normalized_entries,
         "warnings": warnings,
     }
+
+
+def _reconcile_storage_invoice_history(
+    *,
+    clickup_summary: dict[str, Any],
+    bc_client: BusinessCentralClient,
+    validation: dict[str, Any],
+    settings: StorageInvoiceSettings,
+) -> dict[str, Any]:
+    market = str(clickup_summary.get("market") or "GT").strip().upper() or "GT"
+    history = _discover_storage_invoice_history(
+        clickup_summary=clickup_summary,
+        bc_client=bc_client,
+        base_reference=str(validation["base_reference"]),
+        market=market,
+        settings=settings,
+    )
+    if history.get("status") != "passed":
+        return {**validation, **history}
+
+    active_invoices = history["active_storage_invoices"]
+    invoiced_amount = Decimal(str(history["invoiced_amount"]))
+    invoiced_days = int(history["invoiced_container_days"])
+    gross_amount = Decimal(str(validation["amount"]))
+    gross_days = int(validation["container_days"])
+    pending_amount = gross_amount - invoiced_amount
+    pending_days = gross_days - invoiced_days
+    reconciliation = {
+        "billable_to_date": float(gross_amount),
+        "billable_container_days": gross_days,
+        "active_invoiced": float(invoiced_amount),
+        "active_invoiced_container_days": invoiced_days,
+        "pending_to_invoice": float(pending_amount),
+        "pending_container_days": pending_days,
+        "daily_rate": float(settings.daily_rate),
+        "active_storage_invoices": active_invoices,
+        "canceled_storage_invoices": history["canceled_storage_invoices"],
+    }
+    child_references = {
+        f"{str(entry.get('custom_id') or entry.get('task_id') or '').strip()}-{settings.reference_suffix}"
+        for entry in validation.get("entries") or []
+        if str(entry.get("custom_id") or entry.get("task_id") or "").strip()
+    }
+    if child_references and any(
+        str(invoice.get("externalDocumentNumber") or "").strip() in child_references
+        for invoice in active_invoices
+    ):
+        return {
+            **validation,
+            "storage_reconciliation": reconciliation,
+            "split_invoice_replacement_detected": True,
+        }
+    if pending_amount < Decimal("-0.01") or pending_days < 0:
+        return {
+            **validation,
+            "status": "storage_overinvoiced",
+            "message": "Active Business Central Almacenaje invoices exceed the ClickUp billable total.",
+            "storage_reconciliation": reconciliation,
+        }
+    expected_pending = settings.daily_rate * Decimal(pending_days)
+    if abs(pending_amount - expected_pending) >= Decimal("0.01"):
+        return {
+            **validation,
+            "status": "storage_history_mismatch",
+            "message": (
+                "The remaining Almacenaje amount does not reconcile to remaining container-days "
+                "at the configured daily rate."
+            ),
+            "expected_pending_amount": float(expected_pending),
+            "storage_reconciliation": reconciliation,
+        }
+    if abs(pending_amount) < Decimal("0.01") and pending_days == 0:
+        return {
+            **validation,
+            "status": "fully_invoiced",
+            "message": "Almacenaje is fully invoiced through the current ClickUp cut.",
+            "amount": 0.0,
+            "container_days": 0,
+            "storage_reconciliation": reconciliation,
+        }
+
+    pending_entries = _allocate_pending_storage_entries(
+        entries=validation.get("entries") or [],
+        invoice_lines=history["active_storage_lines"],
+        settings=settings,
+    )
+    if pending_entries.get("status") != "passed":
+        return {
+            **validation,
+            **pending_entries,
+            "storage_reconciliation": reconciliation,
+        }
+
+    invoice_sequence = len(active_invoices) + 1
+    base_supplemental_reference = f"{validation['base_reference']}-{settings.reference_suffix}"
+    supplemental_reference = (
+        base_supplemental_reference
+        if invoice_sequence == 1
+        else f"{base_supplemental_reference}-{invoice_sequence:02d}"
+    )
+    reconciled = {
+        **validation,
+        "supplemental_reference": supplemental_reference,
+        "billable_amount": float(gross_amount),
+        "billable_container_days": gross_days,
+        "amount": float(pending_amount),
+        "container_days": pending_days,
+        "invoice_sequence": invoice_sequence,
+        "storage_reconciliation": reconciliation,
+        "message": "Almacenaje pending amount reconciles after active Business Central invoices.",
+    }
+    if validation.get("entries"):
+        reconciled["entries"] = pending_entries["entries"]
+        reconciled["containers"] = len(pending_entries["entries"])
+        reconciled["days"] = None
+    else:
+        containers = int(validation["containers"])
+        if pending_days % containers:
+            return {
+                **reconciled,
+                "status": "ambiguous_storage_history",
+                "message": "Pending Almacenaje container-days cannot be distributed evenly.",
+            }
+        reconciled["days"] = pending_days // containers
+    return reconciled
+
+
+def _discover_storage_invoice_history(
+    *,
+    clickup_summary: dict[str, Any],
+    bc_client: BusinessCentralClient,
+    base_reference: str,
+    market: str,
+    settings: StorageInvoiceSettings,
+) -> dict[str, Any]:
+    references = {base_reference}
+    task_name = str(clickup_summary.get("name") or "").strip()
+    if task_name:
+        references.add(task_name)
+    for entry in clickup_summary.get("storage_entries") or []:
+        for key in ("custom_id", "task_id"):
+            value = str(entry.get(key) or "").strip()
+            if value:
+                references.add(value)
+
+    rows_by_id: dict[str, dict[str, Any]] = {}
+    for reference in sorted(references):
+        escaped = reference.replace("'", "''")
+        rows = bc_client.find_entities(
+            "salesInvoices",
+            filters=f"contains(externalDocumentNumber, '{escaped}')",
+            top=100,
+            market=market,
+        )
+        for row in rows:
+            invoice_id = str(row.get("id") or "").strip()
+            if invoice_id:
+                rows_by_id[invoice_id] = row
+
+    for invoice_number in _attached_storage_invoice_numbers(clickup_summary):
+        if not hasattr(bc_client, "get_posted_sales_invoice_by_number"):
+            continue
+        row = bc_client.get_posted_sales_invoice_by_number(invoice_number, market=market)
+        invoice_id = str((row or {}).get("id") or "").strip()
+        if invoice_id:
+            rows_by_id[invoice_id] = row or {}
+
+    active_invoices: list[dict[str, Any]] = []
+    canceled_invoices: list[dict[str, Any]] = []
+    active_lines: list[dict[str, Any]] = []
+    invoiced_amount = Decimal("0")
+    invoiced_days = 0
+    for invoice in rows_by_id.values():
+        invoice_id = str(invoice.get("id") or "").strip()
+        lines = bc_client.get_posted_sales_invoice_lines(invoice_id, market=market)
+        storage_lines = [
+            line
+            for line in lines
+            if str(line.get("lineObjectNumber") or "").strip() == settings.item_number
+        ]
+        if not storage_lines:
+            continue
+        invoice_number = str(invoice.get("number") or "").strip()
+        fel_row = (
+            bc_client.get_posted_invoice_fel_description_by_number(invoice_number, market=market)
+            if invoice_number
+            and hasattr(bc_client, "get_posted_invoice_fel_description_by_number")
+            else None
+        ) or {}
+        canceled = _invoice_is_canceled(invoice=invoice, fel_row=fel_row)
+        invoice_summary = {
+            "id": invoice_id,
+            "number": invoice_number,
+            "externalDocumentNumber": invoice.get("externalDocumentNumber"),
+            "customerNumber": invoice.get("customerNumber"),
+            "customerName": invoice.get("customerName"),
+            "currencyCode": invoice.get("currencyCode"),
+            "status": invoice.get("status"),
+            "fel_status": fel_row.get("electronicDocumentStatus"),
+            "storage_lines": [],
+        }
+        for line in storage_lines:
+            quantity = _positive_integral_value(line.get("quantity"))
+            unit_price = _decimal_value(line.get("unitPrice"))
+            amount = _decimal_value(line.get("amountIncludingTax"))
+            if quantity is None or unit_price is None or amount is None:
+                return {
+                    "status": "storage_history_requires_review",
+                    "message": f"Storage line data is incomplete on Business Central invoice {invoice_number}.",
+                }
+            if abs(unit_price - settings.daily_rate) >= Decimal("0.00001"):
+                return {
+                    "status": "storage_history_rate_mismatch",
+                    "message": f"Business Central invoice {invoice_number} uses an unexpected storage rate.",
+                    "invoice_number": invoice_number,
+                    "unit_price": float(unit_price),
+                    "expected_daily_rate": float(settings.daily_rate),
+                }
+            if abs(amount - (settings.daily_rate * Decimal(quantity))) >= Decimal("0.01"):
+                return {
+                    "status": "storage_history_amount_mismatch",
+                    "message": f"Storage line amount does not reconcile on invoice {invoice_number}.",
+                }
+            line_summary = {
+                "invoice_number": invoice_number,
+                "description": line.get("description"),
+                "quantity": quantity,
+                "unit_price": float(unit_price),
+                "amount": float(amount),
+            }
+            invoice_summary["storage_lines"].append(line_summary)
+            if not canceled:
+                invoiced_days += quantity
+                invoiced_amount += amount
+                active_lines.append(line_summary)
+        if canceled:
+            canceled_invoices.append(invoice_summary)
+        else:
+            fel_status = _normalize(fel_row.get("electronicDocumentStatus"))
+            if fel_status and fel_status != "stamp received":
+                return {
+                    "status": "storage_history_requires_review",
+                    "message": (
+                        f"Active storage invoice {invoice_number} is not FEL stamped and requires review."
+                    ),
+                    "invoice": invoice_summary,
+                }
+            active_invoices.append(invoice_summary)
+    return {
+        "status": "passed",
+        "active_storage_invoices": active_invoices,
+        "canceled_storage_invoices": canceled_invoices,
+        "active_storage_lines": active_lines,
+        "invoiced_amount": float(invoiced_amount),
+        "invoiced_container_days": invoiced_days,
+    }
+
+
+def _allocate_pending_storage_entries(
+    *,
+    entries: list[dict[str, Any]],
+    invoice_lines: list[dict[str, Any]],
+    settings: StorageInvoiceSettings,
+) -> dict[str, Any]:
+    if not entries:
+        return {"status": "passed", "entries": []}
+    invoiced_by_container = {_container_key(entry["container"]): 0 for entry in entries}
+    for line in invoice_lines:
+        description_key = _container_key(line.get("description"))
+        matches = [key for key in invoiced_by_container if key and key in description_key]
+        if len(entries) == 1 and not matches:
+            matches = [next(iter(invoiced_by_container))]
+        if len(matches) != 1:
+            return {
+                "status": "ambiguous_storage_history",
+                "message": (
+                    f"Storage invoice {line.get('invoice_number')} cannot be attributed to exactly one container."
+                ),
+                "line": line,
+            }
+        invoiced_by_container[matches[0]] += int(line["quantity"])
+
+    pending_entries = []
+    for entry in entries:
+        container_key = _container_key(entry["container"])
+        pending_days = int(entry["days"]) - invoiced_by_container[container_key]
+        if pending_days < 0:
+            return {
+                "status": "storage_overinvoiced",
+                "message": f"Container {entry['container']} has more invoiced days than billable days.",
+            }
+        if pending_days == 0:
+            continue
+        pending_entries.append(
+            {
+                **entry,
+                "billable_days": int(entry["days"]),
+                "invoiced_days": invoiced_by_container[container_key],
+                "days": pending_days,
+                "amount": float(settings.daily_rate * Decimal(pending_days)),
+            }
+        )
+    return {"status": "passed", "entries": pending_entries}
+
+
+def _validate_storage_history_customer(
+    *,
+    validation: dict[str, Any],
+    customer_number: Any,
+) -> dict[str, Any] | None:
+    expected = str(customer_number or "").strip()
+    if not expected:
+        return None
+    mismatches = [
+        invoice
+        for invoice in (validation.get("storage_reconciliation") or {}).get(
+            "active_storage_invoices", []
+        )
+        if str(invoice.get("customerNumber") or "").strip() != expected
+    ]
+    if not mismatches:
+        return None
+    return {
+        **validation,
+        "status": "storage_history_customer_mismatch",
+        "message": "Historical Almacenaje invoices do not match the currently resolved BC customer.",
+        "expected_customer_number": expected,
+        "mismatched_invoices": mismatches,
+    }
+
+
+def _attached_storage_invoice_numbers(clickup_summary: dict[str, Any]) -> set[str]:
+    numbers: set[str] = set()
+    for field in (clickup_summary.get("custom_fields") or {}).values():
+        if str(field.get("id") or "") not in {
+            DEFAULT_STORAGE_INVOICE_ATTACHMENT_FIELD_ID,
+            DEFAULT_INVOICE_TO_CLIENT_FIELD_ID,
+        }:
+            continue
+        for attachment in field.get("value") or []:
+            if not isinstance(attachment, dict):
+                continue
+            title = str(attachment.get("title") or "")
+            numbers.update(match.upper() for match in re.findall(r"GTFVR\d+", title, re.I))
+    return numbers
+
+
+def _invoice_is_canceled(*, invoice: dict[str, Any], fel_row: dict[str, Any]) -> bool:
+    return (
+        _truthy(invoice.get("cancelled"))
+        or _truthy(fel_row.get("cancelled"))
+        or _normalize(invoice.get("status")) in {"canceled", "cancelled"}
+        or _normalize(fel_row.get("electronicDocumentStatus")) in {"canceled", "cancelled"}
+    )
+
+
+def _container_key(value: Any) -> str:
+    return "".join(character for character in str(value or "").upper() if character.isalnum())
+
+
+def _legacy_storage_entries(
+    *,
+    custom_fields: dict[str, dict[str, Any]],
+    days: int,
+    containers: int,
+    settings: StorageInvoiceSettings,
+) -> list[dict[str, Any]]:
+    raw_value = None
+    for name in (
+        "Container(s) number(s)/",
+        "Container Numbers",
+        "Containers",
+        "Container",
+    ):
+        field = custom_fields.get(name) or {}
+        if field.get("value") not in {None, ""}:
+            raw_value = field.get("value")
+            break
+    if raw_value is None:
+        return []
+    identifiers = [
+        part.strip()
+        for part in re.split(r"[,;\n]+", str(raw_value))
+        if part.strip()
+    ]
+    if len(identifiers) != containers or len({_container_key(value) for value in identifiers}) != containers:
+        return []
+    amount = float(settings.daily_rate * Decimal(days))
+    return [
+        {
+            "container": identifier,
+            "days": days,
+            "amount": amount,
+            "containers": 1,
+        }
+        for identifier in identifiers
+    ]
 
 
 def _find_active_split_storage_invoices(

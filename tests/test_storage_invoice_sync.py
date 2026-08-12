@@ -17,10 +17,14 @@ class FakeStorageBCClient:
         *,
         legacy_invoice: dict | None = None,
         invoices_by_reference: dict[str, dict] | None = None,
+        history_invoices: list[dict] | None = None,
+        lines_by_invoice_id: dict[str, list[dict]] | None = None,
     ) -> None:
         self.settings = SimpleNamespace()
         self.legacy_invoice = legacy_invoice
         self.invoices_by_reference = invoices_by_reference or {}
+        self.history_invoices = history_invoices or []
+        self.lines_by_invoice_id = lines_by_invoice_id or {}
 
     def find_entities(self, entity_name: str, *, filters: str, top: int = 1, company_id=None, market=None):
         assert market == "GT"
@@ -36,6 +40,8 @@ class FakeStorageBCClient:
                 }
             ]
         assert entity_name == "salesInvoices"
+        if "contains(externalDocumentNumber" in filters:
+            return self.history_invoices
         for reference, invoice in self.invoices_by_reference.items():
             if f"externalDocumentNumber eq '{reference}'" in filters:
                 return [invoice]
@@ -74,6 +80,8 @@ class FakeStorageBCClient:
 
     def get_posted_sales_invoice_lines(self, invoice_id: str, *, company_id=None, market=None):
         assert market == "GT"
+        if invoice_id in self.lines_by_invoice_id:
+            return self.lines_by_invoice_id[invoice_id]
         return [
             {
                 "documentId": invoice_id,
@@ -192,6 +200,21 @@ def aggregated_storage_summary() -> dict:
             "amount_formula_state": "failed",
         },
     ]
+    return summary
+
+
+def cumulative_storage_summary() -> dict:
+    summary = storage_summary(amount="972")
+    summary["task_id"] = "86e1c272u"
+    summary["custom_id"] = "MTMLXGT-26066"
+    summary["name"] = "GT250103 || MTMLXGT-26066"
+    summary["custom_fields"]["Días de almacenaje incurridos"]["value"] = "36"
+    summary["custom_fields"]["Number of Containers"]["value"] = "1"
+    summary["custom_fields"]["Factura almacenaje al cliente"] = {
+        "id": "c4994b71-cff2-46a3-b169-08f5019e0a93",
+        "type": "attachment",
+        "value": [{"title": "Factura_GTFVR0004336.pdf"}],
+    }
     return summary
 
 
@@ -377,6 +400,187 @@ def test_storage_preview_ignores_split_invoices_with_canceled_status() -> None:
 
     assert result["status"] == "dry_run_ready"
     assert result["reference"] == "MTMLXGT-26217-ALM"
+
+
+def test_storage_preview_invoices_only_cumulative_pending_delta() -> None:
+    history_invoice = {
+        "id": "storage-history-1",
+        "number": "GTFVR0004336",
+        "externalDocumentNumber": "GT250103 || MTMLXGT-26066",
+        "customerNumber": "C00102",
+        "customerName": "CUSTOMER",
+        "currencyCode": "USD",
+        "status": "Open",
+    }
+    history_lines = {
+        "storage-history-1": [
+            {
+                "lineType": "Item",
+                "lineObjectNumber": "NAT00000034",
+                "description": "ALMACENAJES",
+                "quantity": 22,
+                "unitPrice": 27,
+                "amountIncludingTax": 594,
+            }
+        ]
+    }
+    result = prepare_clickup_bc_storage_invoice_preview(
+        clickup_summary=cumulative_storage_summary(),
+        bc_client=FakeStorageBCClient(
+            history_invoices=[history_invoice],
+            lines_by_invoice_id=history_lines,
+        ),
+        invoice_settings=invoice_settings(),
+    )
+
+    assert result["status"] == "dry_run_ready"
+    assert result["reference"] == "MTMLXGT-26066-ALM-02"
+    assert result["proposed_bc_line_payloads"] == [
+        {
+            "lineType": "Item",
+            "lineObjectNumber": "NAT00000034",
+            "itemId": "item-storage",
+            "description": "ALMACENAJES EN PUERTO - Container 1",
+            "quantity": 14,
+            "unitPrice": 27.0,
+        }
+    ]
+    reconciliation = result["storage_validation"]["storage_reconciliation"]
+    assert reconciliation["billable_to_date"] == 972.0
+    assert reconciliation["active_invoiced"] == 594.0
+    assert reconciliation["pending_to_invoice"] == 378.0
+    assert reconciliation["active_invoiced_container_days"] == 22
+    assert reconciliation["pending_container_days"] == 14
+
+
+def test_storage_preview_reports_fully_invoiced_without_new_payload() -> None:
+    history_invoice = {
+        "id": "storage-history-full",
+        "number": "GTFVR0004999",
+        "externalDocumentNumber": "MTMLXGT-26066-ALM",
+        "customerNumber": "C00102",
+        "status": "Open",
+    }
+    result = prepare_clickup_bc_storage_invoice_preview(
+        clickup_summary=cumulative_storage_summary(),
+        bc_client=FakeStorageBCClient(
+            history_invoices=[history_invoice],
+            lines_by_invoice_id={
+                "storage-history-full": [
+                    {
+                        "lineObjectNumber": "NAT00000034",
+                        "description": "ALMACENAJES",
+                        "quantity": 36,
+                        "unitPrice": 27,
+                        "amountIncludingTax": 972,
+                    }
+                ]
+            },
+        ),
+        invoice_settings=invoice_settings(),
+    )
+
+    assert result["status"] == "fully_invoiced"
+    assert result["storage_reconciliation"]["pending_to_invoice"] == 0.0
+
+
+def test_storage_preview_blocks_historical_customer_mismatch() -> None:
+    history_invoice = {
+        "id": "storage-history-wrong-customer",
+        "number": "GTFVR0004336",
+        "externalDocumentNumber": "GT250103 || MTMLXGT-26066",
+        "customerNumber": "C99999",
+        "status": "Open",
+    }
+    result = prepare_clickup_bc_storage_invoice_preview(
+        clickup_summary=cumulative_storage_summary(),
+        bc_client=FakeStorageBCClient(
+            history_invoices=[history_invoice],
+            lines_by_invoice_id={
+                "storage-history-wrong-customer": [
+                    {
+                        "lineObjectNumber": "NAT00000034",
+                        "description": "ALMACENAJES",
+                        "quantity": 22,
+                        "unitPrice": 27,
+                        "amountIncludingTax": 594,
+                    }
+                ]
+            },
+        ),
+        invoice_settings=invoice_settings(),
+    )
+
+    assert result["status"] == "storage_history_customer_mismatch"
+    assert result["expected_customer_number"] == "C00102"
+
+
+def test_storage_preview_blocks_when_active_history_exceeds_billable_cut() -> None:
+    history_invoice = {
+        "id": "storage-history-over",
+        "number": "GTFVR0004998",
+        "externalDocumentNumber": "MTMLXGT-26066-ALM",
+        "customerNumber": "C00102",
+        "status": "Open",
+    }
+    result = prepare_clickup_bc_storage_invoice_preview(
+        clickup_summary=cumulative_storage_summary(),
+        bc_client=FakeStorageBCClient(
+            history_invoices=[history_invoice],
+            lines_by_invoice_id={
+                "storage-history-over": [
+                    {
+                        "lineObjectNumber": "NAT00000034",
+                        "description": "ALMACENAJES",
+                        "quantity": 37,
+                        "unitPrice": 27,
+                        "amountIncludingTax": 999,
+                    }
+                ]
+            },
+        ),
+        invoice_settings=invoice_settings(),
+    )
+
+    assert result["status"] == "storage_overinvoiced"
+    assert result["storage_reconciliation"]["pending_to_invoice"] == -27.0
+
+
+def test_storage_preview_excludes_canceled_history_from_invoiced_total() -> None:
+    history_invoice = {
+        "id": "storage-history-canceled",
+        "number": "GTFVR0004336",
+        "externalDocumentNumber": "GT250103 || MTMLXGT-26066",
+        "customerNumber": "C00102",
+        "status": "Canceled",
+    }
+    result = prepare_clickup_bc_storage_invoice_preview(
+        clickup_summary=cumulative_storage_summary(),
+        bc_client=FakeStorageBCClient(
+            history_invoices=[history_invoice],
+            lines_by_invoice_id={
+                "storage-history-canceled": [
+                    {
+                        "lineObjectNumber": "NAT00000034",
+                        "description": "ALMACENAJES",
+                        "quantity": 22,
+                        "unitPrice": 27,
+                        "amountIncludingTax": 594,
+                    }
+                ]
+            },
+        ),
+        invoice_settings=invoice_settings(),
+    )
+
+    assert result["status"] == "dry_run_ready"
+    assert result["reference"] == "MTMLXGT-26066-ALM"
+    assert result["proposed_bc_line_payloads"][0]["quantity"] == 36
+    reconciliation = result["storage_validation"]["storage_reconciliation"]
+    assert reconciliation["active_invoiced"] == 0.0
+    assert [row["number"] for row in reconciliation["canceled_storage_invoices"]] == [
+        "GTFVR0004336"
+    ]
 
 
 def test_storage_preview_blocks_amount_mismatch() -> None:
