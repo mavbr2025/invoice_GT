@@ -72,6 +72,27 @@ second invoice.
 Keep `CLICKUP_STORAGE_INVOICE_WEBHOOK_APPLY=false` for the first live call. Use
 `CLICKUP_STORAGE_INVOICE_WEBHOOK_TOKEN` for a dedicated credential, or omit it
 to fall back to `CLICKUP_WEBHOOK_TOKEN`.
+
+## Supplemental Guatemala Demurrage and Detention invoices
+
+Use the independent DEM route after the normal USD invoice status is already
+`Facturada`:
+
+```text
+/clickup/webhooks/demurrage-invoice-sync
+```
+
+The route reads `D&D al cliente (USD)`, `Días de D&D`, container count, and
+`Corte de D&D`. It derives the shipment-specific daily rate, reconciles active
+FEL-stamped `NAT00000033` lines, and proposes only the cumulative pending
+difference with references `<CLICKUP-ID>-DEM`, `-DEM-02`, and so on. New DEM
+invoices always use `Invoice to (Consignee's name)`. A historical customer
+change is accepted only when the stamped invoice is explicitly attached in
+`Factura D&D al cliente`; otherwise the customer mismatch blocks issuance.
+
+Keep `CLICKUP_DEMURRAGE_INVOICE_WEBHOOK_APPLY=false` except during a controlled
+issuance. A dedicated `CLICKUP_DEMURRAGE_INVOICE_WEBHOOK_TOKEN` can be set, or
+the route falls back to `CLICKUP_WEBHOOK_TOKEN`.
 ```
 
 Inspection invoices use a dedicated route so their JSON payload is never mixed

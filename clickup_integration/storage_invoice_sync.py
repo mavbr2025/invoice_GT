@@ -44,6 +44,10 @@ class StorageInvoiceSettings:
     item_description: str = "ALMACENAJES EN PUERTO"
     daily_rate: Decimal = Decimal("27")
     reference_suffix: str = "ALM"
+    invoice_group: str = "ALM"
+    charge_label: str = "Almacenaje"
+    invoice_attachment_field_id: str = DEFAULT_STORAGE_INVOICE_ATTACHMENT_FIELD_ID
+    allow_attached_history_customer_mismatch: bool = False
 
     @classmethod
     def from_env(cls) -> "StorageInvoiceSettings":
@@ -95,6 +99,10 @@ class StorageInvoiceSettings:
             daily_rate=_env_decimal("CLICKUP_STORAGE_DAILY_RATE", default=Decimal("27")),
             reference_suffix=os.getenv("CLICKUP_STORAGE_REFERENCE_SUFFIX", "ALM").strip()
             or "ALM",
+            invoice_group="ALM",
+            charge_label="Almacenaje",
+            invoice_attachment_field_id=DEFAULT_STORAGE_INVOICE_ATTACHMENT_FIELD_ID,
+            allow_attached_history_customer_mismatch=False,
         )
 
 
@@ -208,6 +216,7 @@ def prepare_clickup_bc_storage_invoice_preview(
     customer_guard = _validate_storage_history_customer(
         validation=validation,
         customer_number=preview.get("customer_number"),
+        settings=config,
     )
     if customer_guard:
         return customer_guard
@@ -228,7 +237,7 @@ def prepare_clickup_bc_storage_invoice_preview(
                     "Active per-container Almacenaje invoices must be cancelled before the "
                     "consolidated parent invoice can be issued."
                 ),
-                "invoice_group": "ALM",
+                "invoice_group": config.invoice_group,
                 "replacement_reference": validation["supplemental_reference"],
                 "invoices_to_cancel": split_invoices,
                 "storage_validation": validation,
@@ -248,11 +257,11 @@ def prepare_clickup_bc_storage_invoice_preview(
                 "status": "duplicate_invoice",
                 "message": "An existing Business Central Almacenaje invoice matches this shipment and amount.",
                 "reference": legacy_duplicate.get("externalDocumentNumber"),
-                "invoice_group": "ALM",
+                "invoice_group": config.invoice_group,
                 "existing_invoice": legacy_duplicate,
                 "duplicate_invoices": [
                     {
-                        "invoice_group": "ALM",
+                        "invoice_group": config.invoice_group,
                         "reference": legacy_duplicate.get("externalDocumentNumber"),
                         "existing_invoice": legacy_duplicate,
                     }
@@ -284,7 +293,7 @@ def issue_clickup_bc_storage_invoice(
         storage_settings=config,
     )
     if preview.get("status") == "duplicate_invoice":
-        return _recover_stamped_existing_invoice(preview)
+        return _recover_stamped_existing_invoice(preview, settings=config)
     if preview.get("status") != "dry_run_ready":
         return preview
 
@@ -305,7 +314,8 @@ def issue_clickup_bc_storage_invoice(
             **result,
             "storage_validation": validation,
             "supplemental_invoice": True,
-        }
+        },
+        settings=config,
     )
 
 
@@ -731,7 +741,16 @@ def _discover_storage_invoice_history(
             if invoice_id:
                 rows_by_id[invoice_id] = row
 
-    for invoice_number in _attached_storage_invoice_numbers(clickup_summary):
+    attached_invoice_numbers = _attached_storage_invoice_numbers(
+        clickup_summary,
+        settings=settings,
+    )
+    dedicated_attached_invoice_numbers = _attached_storage_invoice_numbers(
+        clickup_summary,
+        settings=settings,
+        include_invoice_to_client=False,
+    )
+    for invoice_number in attached_invoice_numbers:
         if not hasattr(bc_client, "get_posted_sales_invoice_by_number"):
             continue
         row = bc_client.get_posted_sales_invoice_by_number(invoice_number, market=market)
@@ -771,6 +790,7 @@ def _discover_storage_invoice_history(
             "currencyCode": invoice.get("currencyCode"),
             "status": invoice.get("status"),
             "fel_status": fel_row.get("electronicDocumentStatus"),
+            "explicitly_attached": invoice_number.upper() in dedicated_attached_invoice_numbers,
             "storage_lines": [],
         }
         for line in storage_lines:
@@ -881,6 +901,7 @@ def _validate_storage_history_customer(
     *,
     validation: dict[str, Any],
     customer_number: Any,
+    settings: StorageInvoiceSettings,
 ) -> dict[str, Any] | None:
     expected = str(customer_number or "").strip()
     if not expected:
@@ -894,6 +915,25 @@ def _validate_storage_history_customer(
     ]
     if not mismatches:
         return None
+    if settings.allow_attached_history_customer_mismatch and all(
+        invoice.get("explicitly_attached") for invoice in mismatches
+    ):
+        validation.setdefault("warnings", []).append(
+            {
+                "reason": "historical_customer_changed",
+                "accepted_because": "invoice_explicitly_attached_to_dedicated_charge_field",
+                "expected_customer_number": expected,
+                "historical_invoices": [
+                    {
+                        "number": invoice.get("number"),
+                        "customer_number": invoice.get("customerNumber"),
+                        "customer_name": invoice.get("customerName"),
+                    }
+                    for invoice in mismatches
+                ],
+            }
+        )
+        return None
     return {
         **validation,
         "status": "storage_history_customer_mismatch",
@@ -903,13 +943,18 @@ def _validate_storage_history_customer(
     }
 
 
-def _attached_storage_invoice_numbers(clickup_summary: dict[str, Any]) -> set[str]:
+def _attached_storage_invoice_numbers(
+    clickup_summary: dict[str, Any],
+    *,
+    settings: StorageInvoiceSettings,
+    include_invoice_to_client: bool = True,
+) -> set[str]:
     numbers: set[str] = set()
+    attachment_field_ids = {settings.invoice_attachment_field_id}
+    if include_invoice_to_client:
+        attachment_field_ids.add(DEFAULT_INVOICE_TO_CLIENT_FIELD_ID)
     for field in (clickup_summary.get("custom_fields") or {}).values():
-        if str(field.get("id") or "") not in {
-            DEFAULT_STORAGE_INVOICE_ATTACHMENT_FIELD_ID,
-            DEFAULT_INVOICE_TO_CLIENT_FIELD_ID,
-        }:
+        if str(field.get("id") or "") not in attachment_field_ids:
             continue
         for attachment in field.get("value") or []:
             if not isinstance(attachment, dict):
@@ -1042,7 +1087,11 @@ def _find_legacy_storage_invoice(
     return None
 
 
-def _recover_stamped_existing_invoice(preview: dict[str, Any]) -> dict[str, Any]:
+def _recover_stamped_existing_invoice(
+    preview: dict[str, Any],
+    *,
+    settings: StorageInvoiceSettings,
+) -> dict[str, Any]:
     invoice = preview.get("existing_invoice") or {}
     fel_row = invoice.get("existing_fel_row") or {}
     if str(fel_row.get("electronicDocumentStatus") or "").strip().lower() != "stamp received":
@@ -1056,10 +1105,10 @@ def _recover_stamped_existing_invoice(preview: dict[str, Any]) -> dict[str, Any]
         "status": "applied",
         "message": "Reusing the existing stamped manual Almacenaje invoice for delivery.",
         "reused_existing_storage_invoice": True,
-        "created_invoices": [{**invoice, "invoice_group": "ALM"}],
+        "created_invoices": [{**invoice, "invoice_group": settings.invoice_group}],
         "finalized_invoices": [
             {
-                "invoice_group": "ALM",
+                "invoice_group": settings.invoice_group,
                 "externalDocumentNumber": invoice.get("externalDocumentNumber"),
                 "posted_invoice_after_stamp": invoice,
                 "custom_api_row_after_stamp": fel_row,
@@ -1069,16 +1118,20 @@ def _recover_stamped_existing_invoice(preview: dict[str, Any]) -> dict[str, Any]
     }
 
 
-def _label_storage_invoice_result(result: dict[str, Any]) -> dict[str, Any]:
+def _label_storage_invoice_result(
+    result: dict[str, Any],
+    *,
+    settings: StorageInvoiceSettings,
+) -> dict[str, Any]:
     labeled = dict(result)
     for key in ("created_invoices", "posted_invoices"):
         labeled[key] = [
-            {**invoice, "invoice_group": "ALM"}
+            {**invoice, "invoice_group": settings.invoice_group}
             for invoice in result.get(key) or []
             if isinstance(invoice, dict)
         ]
     labeled["finalized_invoices"] = [
-        {**invoice, "invoice_group": "ALM"}
+        {**invoice, "invoice_group": settings.invoice_group}
         for invoice in result.get("finalized_invoices") or []
         if isinstance(invoice, dict)
     ]

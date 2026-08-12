@@ -28,6 +28,12 @@ from clickup_integration.invoice_sync import (
 )
 from clickup_integration.mapping import summarize_task_for_customer_mapping
 from clickup_integration.matcher import match_clickup_customer_to_bc
+from clickup_integration.demurrage_invoice_sync import (
+    DemurrageInvoiceSettings,
+    build_clickup_demurrage_invoice_context,
+    issue_clickup_bc_demurrage_invoice,
+    prepare_clickup_bc_demurrage_invoice_preview,
+)
 from clickup_integration.storage_invoice_sync import (
     StorageInvoiceSettings,
     build_clickup_storage_invoice_context,
@@ -112,6 +118,41 @@ def storage_invoice_sync_readiness() -> dict[str, Any]:
         "bc_item_number": storage_settings.item_number,
         "daily_rate": float(storage_settings.daily_rate),
         "reference_suffix": storage_settings.reference_suffix,
+    }
+
+
+@app.get("/clickup/webhooks/demurrage-invoice-sync/readiness")
+def demurrage_invoice_sync_readiness() -> dict[str, Any]:
+    try:
+        invoice_settings = InvoiceAutomationSettings.from_env()
+        demurrage_settings = DemurrageInvoiceSettings.from_env()
+    except Exception as exc:
+        logger.exception("Demurrage invoice bridge readiness check failed.")
+        return {"status": "not_ready", "message": str(exc)}
+    missing_runtime_config = [
+        name for name in ("CLICKUP_ACCESS_TOKEN",) if not os.getenv(name, "").strip()
+    ]
+    if not _demurrage_invoice_webhook_token():
+        missing_runtime_config.append(
+            "CLICKUP_DEMURRAGE_INVOICE_WEBHOOK_TOKEN or CLICKUP_WEBHOOK_TOKEN"
+        )
+    return {
+        "status": "not_ready" if missing_runtime_config else "ready",
+        "missing_runtime_config": missing_runtime_config,
+        "apply_mode": _env_bool("CLICKUP_DEMURRAGE_INVOICE_WEBHOOK_APPLY", default=False),
+        "customer_email_enabled": should_send_invoice_customer_email(),
+        "market": invoice_settings.supported_market,
+        "currency": invoice_settings.supported_currency,
+        "required_invoice_status": demurrage_settings.required_invoice_status,
+        "amount_field_id": demurrage_settings.amount_field_id,
+        "days_field_id": demurrage_settings.days_field_id,
+        "container_count_field_id": demurrage_settings.container_count_field_id,
+        "cut_field_id": demurrage_settings.cut_field_id,
+        "invoiced_field_id": demurrage_settings.invoiced_field_id,
+        "invoice_attachment_field_id": demurrage_settings.invoice_attachment_field_id,
+        "rate_mode": "derived_per_shipment",
+        "bc_item_number": demurrage_settings.item_number,
+        "reference_suffix": demurrage_settings.reference_suffix,
     }
 
 
@@ -774,6 +815,155 @@ async def clickup_storage_invoice_sync(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@app.post("/clickup/webhooks/demurrage-invoice-sync")
+@app.post("/clickup/webhooks/demurrage-invoice-sync{webhook_path:path}")
+@app.post("/clickup/webhooks/demurrage-invoice-sync/{webhook_path:path}")
+async def clickup_demurrage_invoice_sync(
+    request: Request,
+    webhook_path: str = "",
+    x_webhook_token: str | None = Header(default=None, alias="X-Webhook-Token"),
+    authorization: str | None = Header(default=None, alias="Authorization"),
+) -> dict[str, Any]:
+    expected_token = _demurrage_invoice_webhook_token()
+    if not expected_token:
+        raise HTTPException(status_code=500, detail="Demurrage invoice webhook token is not configured.")
+    provided_token = _extract_webhook_token(
+        x_webhook_token=x_webhook_token,
+        authorization=authorization,
+    )
+    if provided_token != expected_token:
+        raise HTTPException(status_code=401, detail="Invalid webhook token.")
+
+    payload = await _safe_json(request)
+    task_id = extract_task_id(payload) or extract_task_id_from_path(
+        request.url.path,
+        base_path="/clickup/webhooks/demurrage-invoice-sync",
+    )
+    if not task_id:
+        return {"status": "ignored", "reason": "missing_task_id"}
+
+    try:
+        clickup = ClickUpClient(ClickUpSettings.from_env())
+        bc = BusinessCentralClient(BusinessCentralSettings.from_env())
+        invoice_settings = InvoiceAutomationSettings.from_env()
+        demurrage_settings = DemurrageInvoiceSettings.from_env()
+        team_id = _resolve_clickup_team_id(clickup)
+        use_custom_task_ids = _env_bool("CLICKUP_WEBHOOK_CUSTOM_TASK_IDS", default=True)
+        task = _fetch_clickup_task_for_webhook(
+            clickup=clickup,
+            task_id=task_id,
+            custom_task_ids=use_custom_task_ids,
+            team_id=team_id,
+        )
+        if task is None:
+            return {"status": "ignored", "reason": "task_lookup_failed", "task_id": task_id}
+
+        parent_value = task.get("parent")
+        parent_id = (
+            str(parent_value.get("id") or "").strip()
+            if isinstance(parent_value, dict)
+            else str(parent_value or "").strip()
+        )
+        invoice_task_id = parent_id or str(task.get("id") or "").strip()
+        invoice_task = _fetch_clickup_task_for_webhook(
+            clickup=clickup,
+            task_id=invoice_task_id,
+            custom_task_ids=False,
+            team_id=team_id,
+            include_subtasks=True,
+        )
+        if parent_id and invoice_task is None:
+            result = {
+                "status": "blocked",
+                "mode": "dry_run",
+                "reason": "parent_lookup_failed",
+                "task_id": task.get("id"),
+                "parent_task_id": parent_id,
+            }
+            _log_webhook_result(task_id=str(task.get("id") or task_id), result=result)
+            return result
+
+        summary = build_clickup_demurrage_invoice_context(
+            requested_task=task,
+            invoice_task=invoice_task or task,
+            demurrage_settings=demurrage_settings,
+        )
+        preview = prepare_clickup_bc_demurrage_invoice_preview(
+            clickup_summary=summary,
+            bc_client=bc,
+            invoice_settings=invoice_settings,
+            demurrage_settings=demurrage_settings,
+        )
+        apply_mode = _env_bool("CLICKUP_DEMURRAGE_INVOICE_WEBHOOK_APPLY", default=False)
+        preview_status = str(preview.get("status") or "").strip()
+        apply_eligible_statuses = {"dry_run_ready", "duplicate_invoice"}
+        if not apply_mode or preview_status not in apply_eligible_statuses:
+            result = {
+                "status": "processed" if preview_status in apply_eligible_statuses else "blocked",
+                "mode": "dry_run",
+                "task_id": task.get("id"),
+                "invoice_owner_task_id": summary.get("task_id"),
+                "result": preview,
+            }
+            _log_webhook_result(task_id=str(task.get("id") or task_id), result=result)
+            return result
+
+        validate_invoice_pdf_field_on_task(summary)
+        issued = issue_clickup_bc_demurrage_invoice(
+            clickup_summary=summary,
+            bc_client=bc,
+            invoice_settings=invoice_settings,
+            demurrage_settings=demurrage_settings,
+        )
+        if issued.get("status") != "applied":
+            result = {
+                "status": "failed",
+                "mode": "apply",
+                "task_id": task.get("id"),
+                "result": issued,
+            }
+            _log_webhook_result(task_id=str(task.get("id") or task_id), result=result)
+            return result
+
+        actions = list(issued.get("completed_stages") or [])
+        if should_send_invoice_customer_email():
+            customer_email_delivery = send_issued_invoice_customer_emails(
+                bc_client=bc,
+                invoice_result=issued,
+                settings=invoice_settings,
+            )
+            issued = {**issued, "customer_email_delivery": customer_email_delivery}
+            actions.append("send_customer_email_from_bc")
+
+        delivery = finalize_clickup_issued_invoices(
+            clickup=clickup,
+            bc_client=bc,
+            clickup_summary=summary,
+            invoice_result=issued,
+            settings=invoice_settings,
+            workspace_id=team_id,
+            mark_status=False,
+        )
+        actions.extend(("upload_invoice_pdf", "comment_invoice_details", "retain_facturada_status"))
+        result = {
+            "status": "processed",
+            "mode": "apply",
+            "action": ",".join(actions),
+            "task_id": task.get("id"),
+            "invoice_owner_task_id": summary.get("task_id"),
+            "result": issued,
+            "delivery": delivery,
+            "final_status_update": None,
+        }
+        _log_webhook_result(task_id=str(task.get("id") or task_id), result=result)
+        return result
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Demurrage invoice webhook failed task_id=%s", task_id)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @app.post("/clickup/webhooks/inspection-invoice-sync")
 @app.post("/clickup/webhooks/inspection-invoice-sync{webhook_path:path}")
 @app.post("/clickup/webhooks/inspection-invoice-sync/{webhook_path:path}")
@@ -1308,6 +1498,14 @@ def _storage_invoice_webhook_token() -> str:
     """Use an isolated credential for supplemental Almacenaje invoices when configured."""
     return (
         os.getenv("CLICKUP_STORAGE_INVOICE_WEBHOOK_TOKEN", "").strip()
+        or os.getenv("CLICKUP_WEBHOOK_TOKEN", "").strip()
+    )
+
+
+def _demurrage_invoice_webhook_token() -> str:
+    """Use an isolated credential for supplemental D&D invoices when configured."""
+    return (
+        os.getenv("CLICKUP_DEMURRAGE_INVOICE_WEBHOOK_TOKEN", "").strip()
         or os.getenv("CLICKUP_WEBHOOK_TOKEN", "").strip()
     )
 
