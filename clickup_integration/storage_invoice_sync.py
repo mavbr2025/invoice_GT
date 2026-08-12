@@ -216,6 +216,7 @@ def prepare_clickup_bc_storage_invoice_preview(
     customer_guard = _validate_storage_history_customer(
         validation=validation,
         customer_number=preview.get("customer_number"),
+        currency=preview.get("currency"),
         settings=config,
     )
     if customer_guard:
@@ -901,8 +902,26 @@ def _validate_storage_history_customer(
     *,
     validation: dict[str, Any],
     customer_number: Any,
+    currency: Any,
     settings: StorageInvoiceSettings,
 ) -> dict[str, Any] | None:
+    expected_currency = str(currency or "").strip().upper()
+    currency_mismatches = [
+        invoice
+        for invoice in (validation.get("storage_reconciliation") or {}).get(
+            "active_storage_invoices", []
+        )
+        if expected_currency
+        and str(invoice.get("currencyCode") or "").strip().upper() != expected_currency
+    ]
+    if currency_mismatches:
+        return {
+            **validation,
+            "status": "storage_history_currency_mismatch",
+            "message": "Historical charge invoices do not match the currently resolved currency.",
+            "expected_currency": expected_currency,
+            "mismatched_invoices": currency_mismatches,
+        }
     expected = str(customer_number or "").strip()
     if not expected:
         return None

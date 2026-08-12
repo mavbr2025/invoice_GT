@@ -490,6 +490,7 @@ def test_storage_preview_blocks_historical_customer_mismatch() -> None:
         "number": "GTFVR0004336",
         "externalDocumentNumber": "GT250103 || MTMLXGT-26066",
         "customerNumber": "C99999",
+        "currencyCode": "USD",
         "status": "Open",
     }
     result = prepare_clickup_bc_storage_invoice_preview(

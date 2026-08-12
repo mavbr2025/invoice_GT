@@ -34,6 +34,7 @@ class DemurrageInvoiceSettings:
     container_count_field_id: str = DEFAULT_CONTAINER_COUNT_FIELD_ID
     container_count_field_name: str = "Number of Containers"
     cut_field_id: str = DEFAULT_DEMURRAGE_CUT_FIELD_ID
+    cut_field_name: str = "Corte de D&D"
     invoiced_field_id: str = DEFAULT_DEMURRAGE_INVOICED_FIELD_ID
     invoice_attachment_field_id: str = DEFAULT_DEMURRAGE_ATTACHMENT_FIELD_ID
     item_number: str = DEFAULT_DEMURRAGE_ITEM_NUMBER
@@ -66,6 +67,7 @@ class DemurrageInvoiceSettings:
             cut_field_id=_env(
                 "CLICKUP_DEMURRAGE_CUT_FIELD_ID", DEFAULT_DEMURRAGE_CUT_FIELD_ID
             ),
+            cut_field_name=_env("CLICKUP_DEMURRAGE_CUT_FIELD_NAME", "Corte de D&D"),
             invoiced_field_id=_env(
                 "CLICKUP_DEMURRAGE_INVOICED_FIELD_ID",
                 DEFAULT_DEMURRAGE_INVOICED_FIELD_ID,
@@ -185,6 +187,12 @@ def _derive_daily_rate(
             rates.append(amount / Decimal(days))
     else:
         fields = clickup_summary.get("custom_fields") or {}
+        cut = _field_value(fields, settings.cut_field_id, settings.cut_field_name)
+        if not _truthy(cut):
+            return {
+                "status": "demurrage_cut_not_ready",
+                "message": "Corte de D&D must be checked before DEM invoicing.",
+            }
         amount = _decimal(_field_value(fields, settings.amount_field_id, settings.amount_field_name))
         days = _positive_integer(_field_value(fields, settings.days_field_id, settings.days_field_name))
         containers = _positive_integer(
@@ -238,6 +246,12 @@ def _positive_integer(value: Any) -> int | None:
     if parsed is None or parsed <= 0 or parsed != parsed.to_integral_value():
         return None
     return int(parsed)
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "si", "sí", "checked"}
 
 
 def _label_demurrage_result(

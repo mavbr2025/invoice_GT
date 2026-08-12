@@ -152,6 +152,11 @@ def demurrage_summary(*, dedicated_attachment: bool = True) -> dict:
             "id": "a05a2c81-2079-4467-9bfe-3723537bd350",
             "value": "1",
         },
+        "Corte de D&D": {
+            "id": "7cd14623-4ac1-4c03-bcea-50782047f2d6",
+            "type": "checkbox",
+            "value": "true",
+        },
         "Container(s) number(s)/": {"value": "TCLU4945180"},
     }
     if dedicated_attachment:
@@ -245,3 +250,37 @@ def test_demurrage_preview_blocks_historical_rate_mismatch() -> None:
 
     assert result["status"] == "storage_history_rate_mismatch"
     assert result["expected_daily_rate"] == 185.0
+
+
+def test_demurrage_preview_requires_cut_checkbox() -> None:
+    summary = demurrage_summary()
+    summary["custom_fields"]["Corte de D&D"]["value"] = None
+
+    result = prepare_clickup_bc_demurrage_invoice_preview(
+        clickup_summary=summary,
+        bc_client=FakeDemurrageBCClient(),
+        invoice_settings=invoice_settings(),
+    )
+
+    assert result["status"] == "demurrage_cut_not_ready"
+
+
+def test_demurrage_preview_blocks_historical_currency_mismatch() -> None:
+    client = FakeDemurrageBCClient()
+    original_find = client.find_entities
+
+    def find_with_gtq(entity_name: str, **kwargs):
+        rows = original_find(entity_name, **kwargs)
+        if entity_name == "salesInvoices":
+            return [{**row, "currencyCode": "GTQ"} for row in rows]
+        return rows
+
+    client.find_entities = find_with_gtq
+    result = prepare_clickup_bc_demurrage_invoice_preview(
+        clickup_summary=demurrage_summary(dedicated_attachment=False),
+        bc_client=client,
+        invoice_settings=invoice_settings(),
+    )
+
+    assert result["status"] == "storage_history_currency_mismatch"
+    assert result["expected_currency"] == "USD"
