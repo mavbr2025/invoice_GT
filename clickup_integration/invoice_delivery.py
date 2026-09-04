@@ -37,6 +37,10 @@ DEFAULT_MX_REQUIRED_PDF_TEXT = (
 )
 
 
+class ClickUpInvoiceFieldDeliveryError(RuntimeError):
+    """The dedicated ClickUp invoice file field could not accept the PDF."""
+
+
 def resolve_invoice_pdf_field_id() -> str:
     pdf_field_id = os.getenv("CLICKUP_INVOICE_PDF_FIELD_ID", DEFAULT_INVOICE_PDF_FIELD_ID).strip()
     if not pdf_field_id:
@@ -50,7 +54,7 @@ def should_validate_invoice_pdf_layout() -> bool:
 
 
 def should_send_invoice_customer_email() -> bool:
-    """Keep native BC customer delivery explicitly opt-in during rollout."""
+    """Control guarded native BC customer delivery for Guatemala invoice flows."""
     raw_value = os.getenv("CLICKUP_INVOICE_SEND_ENABLED", "false").strip().lower()
     return raw_value in {"1", "true", "yes", "on"}
 
@@ -97,7 +101,13 @@ def send_issued_invoice_customer_emails(
             market=market,
         )
         bc_client.send_posted_invoice_customer_email(fel_row_id, market=market)
-        audit = bc_client.get_invoice_email_delivery_by_posted_invoice_id(invoice_id, market=market)
+        # The standard salesInvoices API id is not the posted Sales Invoice Header
+        # SystemId used by the extension audit table. The FEL API row is keyed by
+        # that posted SystemId, so use it for the authoritative delivery readback.
+        audit = bc_client.get_invoice_email_delivery_by_posted_invoice_id(
+            fel_row_id,
+            market=market,
+        )
         audit_status = str((audit or {}).get("status") or "").strip().lower()
         if audit_status != "sent":
             raise ValueError(
@@ -163,26 +173,57 @@ def finalize_clickup_issued_invoices(
         raise ValueError("A ClickUp workspace ID is required to upload invoice PDFs to a custom field.")
 
     pdf_field_id = resolve_invoice_pdf_field_id()
-    validate_invoice_pdf_field_on_task(clickup_summary, field_id=pdf_field_id)
+    field_delivery_error: Exception | None = None
+    try:
+        validate_invoice_pdf_field_on_task(clickup_summary, field_id=pdf_field_id)
+    except ValueError as exc:
+        if "does not expose the Invoice to Client custom field" not in str(exc):
+            raise
+        field_delivery_error = exc
 
-    uploaded_documents, pdf_field_update = _upload_invoice_pdfs_to_clickup_field(
-        clickup=clickup,
-        bc_client=bc_client,
-        task_id=clickup_summary["task_id"],
-        workspace_id=resolved_workspace_id,
-        field_id=pdf_field_id,
-        created_invoices=created_invoices,
-        market=market,
-        existing_attachment_ids=_existing_file_field_attachment_ids(
-            clickup_summary.get("custom_fields") or {},
-            field_id=pdf_field_id,
-        ),
-    )
+    delivery_mode = "invoice_to_client_field"
+    if field_delivery_error is None:
+        try:
+            uploaded_documents, pdf_field_update = _upload_invoice_pdfs_to_clickup_field(
+                clickup=clickup,
+                bc_client=bc_client,
+                task_id=clickup_summary["task_id"],
+                workspace_id=resolved_workspace_id,
+                field_id=pdf_field_id,
+                created_invoices=created_invoices,
+                market=market,
+                existing_attachment_ids=_existing_file_field_attachment_ids(
+                    clickup_summary.get("custom_fields") or {},
+                    field_id=pdf_field_id,
+                ),
+            )
+        except ClickUpInvoiceFieldDeliveryError as exc:
+            field_delivery_error = exc
+
+    if field_delivery_error is not None:
+        delivery_mode = "task_attachment_comment_fallback"
+        logger.warning(
+            "Invoice to Client delivery failed for ClickUp task %s; using task attachments.",
+            clickup_summary["task_id"],
+        )
+        uploaded_documents = _upload_invoice_pdfs_to_clickup_task(
+            clickup=clickup,
+            bc_client=bc_client,
+            task_id=clickup_summary["task_id"],
+            created_invoices=created_invoices,
+            market=market,
+        )
+        pdf_field_update = {
+            "status": "fallback_task_attachments",
+            "field_id": pdf_field_id,
+            "reason": _safe_delivery_error(field_delivery_error),
+        }
     comment_text = build_issued_invoice_comment(
         bc_client=bc_client,
         market=market,
         created_invoices=created_invoices,
         uploaded_documents=uploaded_documents,
+        delivery_mode=delivery_mode,
     )
     comment = clickup.create_task_comment(
         clickup_summary["task_id"],
@@ -199,6 +240,7 @@ def finalize_clickup_issued_invoices(
 
     return {
         "pdf_field_id": pdf_field_id,
+        "delivery_mode": delivery_mode,
         "uploaded_documents": uploaded_documents,
         "pdf_field_update": pdf_field_update,
         "comment": comment,
@@ -286,6 +328,7 @@ def build_issued_invoice_comment(
     market: str,
     created_invoices: list[dict[str, Any]],
     uploaded_documents: list[dict[str, Any]],
+    delivery_mode: str = "invoice_to_client_field",
 ) -> str:
     company = bc_client.get_company_metadata(market=market)
     company_name = (company or {}).get("name") or (company or {}).get("displayName") or ""
@@ -294,6 +337,14 @@ def build_issued_invoice_comment(
     }
 
     lines = ["Business Central invoices issued:"]
+    if delivery_mode == "task_attachment_comment_fallback":
+        lines.extend(
+            [
+                "",
+                "ENTREGA EN CLICKUP: LOS PDF CERTIFICADOS FUERON ADJUNTADOS DIRECTAMENTE A LA TAREA.",
+                "EL CAMPO INVOICE TO CLIENT NO ESTABA DISPONIBLE PARA ESTA OPERACION.",
+            ]
+        )
     for invoice in created_invoices:
         invoice_group = str(invoice.get("invoice_group") or "ALL").upper()
         invoice_number = invoice.get("number") or ""
@@ -311,7 +362,7 @@ def build_issued_invoice_comment(
                 f"- Number: {invoice_number}",
                 f"- ID: {invoice_id}",
                 f"- Link: {link or 'Unavailable'}",
-                f"- PDF: {uploaded.get('file_name') or 'Unavailable'}",
+                f"- PDF: {_uploaded_document_reference(uploaded)}",
             ]
         )
     return "\n".join(lines)
@@ -352,19 +403,26 @@ def _upload_invoice_pdfs_to_clickup_field(
         )
         temp_path = _write_temp_pdf(pdf_content)
         try:
-            upload_result = clickup.upload_custom_field_attachment(
-                workspace_id,
-                field_id,
-                temp_path,
-                file_name=file_name,
-                mime_type="application/pdf",
-            )
+            try:
+                upload_result = clickup.upload_custom_field_attachment(
+                    workspace_id,
+                    field_id,
+                    temp_path,
+                    file_name=file_name,
+                    mime_type="application/pdf",
+                )
+            except Exception as exc:
+                raise ClickUpInvoiceFieldDeliveryError(
+                    f"Could not upload {file_name} to the Invoice to Client field."
+                ) from exc
         finally:
             temp_path.unlink(missing_ok=True)
 
         attachment_id = _extract_attachment_id(upload_result)
         if not attachment_id:
-            raise ValueError(f"ClickUp did not return an attachment id for {file_name}.")
+            raise ClickUpInvoiceFieldDeliveryError(
+                f"ClickUp did not return an attachment id for {file_name}."
+            )
         new_attachment_ids.append(attachment_id)
         uploaded_documents.append(
             {
@@ -382,7 +440,12 @@ def _upload_invoice_pdfs_to_clickup_field(
     combined_attachment_ids = [*existing_attachment_ids, *new_attachment_ids]
     # A Files custom field appends values when set. Clear it first so a
     # reissue replaces the cancelled PDF instead of leaving a stale document.
-    clickup.clear_task_custom_field_value(task_id, field_id)
+    try:
+        clickup.clear_task_custom_field_value(task_id, field_id)
+    except Exception as exc:
+        raise ClickUpInvoiceFieldDeliveryError(
+            "Could not clear the Invoice to Client field before replacing its PDFs."
+        ) from exc
     try:
         pdf_field_update = clickup.set_task_file_custom_field_attachments(
             task_id,
@@ -400,8 +463,68 @@ def _upload_invoice_pdfs_to_clickup_field(
                 )
             except Exception:  # pragma: no cover - surface the original failure
                 logger.exception("Could not restore ClickUp Invoice to Client attachments.")
-        raise
+        raise ClickUpInvoiceFieldDeliveryError(
+            "Could not set the final Invoice to Client attachment list."
+        )
     return uploaded_documents, pdf_field_update
+
+
+def _upload_invoice_pdfs_to_clickup_task(
+    *,
+    clickup: ClickUpClient,
+    bc_client: BusinessCentralClient,
+    task_id: str,
+    created_invoices: list[dict[str, Any]],
+    market: str,
+) -> list[dict[str, Any]]:
+    uploaded_documents: list[dict[str, Any]] = []
+    for invoice in created_invoices:
+        invoice_id = str(invoice.get("id") or "").strip()
+        if not invoice_id:
+            raise ValueError("Created invoice is missing its Business Central id.")
+        invoice_number = str(invoice.get("number") or invoice_id).strip()
+        invoice_group = str(invoice.get("invoice_group") or "").strip().upper()
+        file_stem = invoice.get("externalDocumentNumber") or invoice_number
+        file_name = f"{file_stem}.pdf"
+        pdf_content = _download_invoice_pdf_with_retry(
+            bc_client=bc_client,
+            invoice_id=invoice_id,
+            market=market,
+        )
+        layout_validation = validate_invoice_pdf_layout(
+            pdf_content,
+            invoice_number=invoice_number,
+            invoice_group=invoice_group,
+            market=market,
+        )
+        temp_path = _write_temp_pdf(pdf_content)
+        try:
+            upload_result = clickup.attach_file_to_task(
+                task_id,
+                temp_path,
+                file_name=file_name,
+                mime_type="application/pdf",
+            )
+        finally:
+            temp_path.unlink(missing_ok=True)
+        attachment_id = _extract_attachment_id(upload_result)
+        if not attachment_id:
+            raise ValueError(f"ClickUp did not return a task attachment id for {file_name}.")
+        uploaded_documents.append(
+            {
+                "invoice_group": invoice_group,
+                "invoice_id": invoice_id,
+                "invoice_number": invoice_number,
+                "file_name": file_name,
+                "attachment_id": attachment_id,
+                "attachment_url": _extract_attachment_url(upload_result),
+                "pdf_source": "business_central_salesInvoices_pdfDocument",
+                "delivery_destination": "clickup_task_attachment",
+                "layout_validation": layout_validation,
+                "upload_result": upload_result,
+            }
+        )
+    return uploaded_documents
 
 
 def _download_invoice_pdf_with_retry(
@@ -549,6 +672,35 @@ def _extract_attachment_id(upload_result: dict[str, Any]) -> str:
         if candidate is not None and str(candidate).strip():
             return str(candidate).strip()
     return ""
+
+
+def _extract_attachment_url(upload_result: dict[str, Any]) -> str:
+    candidates: list[Any] = [
+        upload_result.get("url"),
+        upload_result.get("url_w_query"),
+        upload_result.get("url_w_host"),
+    ]
+    attachments = upload_result.get("attachments")
+    if isinstance(attachments, list) and attachments and isinstance(attachments[0], dict):
+        first = attachments[0]
+        candidates.extend([first.get("url"), first.get("url_w_query"), first.get("url_w_host")])
+    for candidate in candidates:
+        if candidate is not None and str(candidate).strip():
+            return str(candidate).strip()
+    return ""
+
+
+def _uploaded_document_reference(uploaded: dict[str, Any]) -> str:
+    file_name = str(uploaded.get("file_name") or "Unavailable")
+    attachment_url = str(uploaded.get("attachment_url") or "").strip()
+    if attachment_url:
+        return f"{file_name} | {attachment_url}"
+    return file_name
+
+
+def _safe_delivery_error(error: Exception) -> str:
+    message = str(error).strip() or error.__class__.__name__
+    return message[:500]
 
 
 def _existing_file_field_attachment_ids(

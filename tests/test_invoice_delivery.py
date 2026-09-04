@@ -96,6 +96,7 @@ class FakeEmailBC(FakeBC):
         self.native_verified = native_verified
         self.message_id = message_id
         self.sent_row_ids = []
+        self.audit_lookup_ids = []
 
     def get_posted_invoice_fel_description_by_number(self, invoice_number, *, market=None):
         return {"id": f"fel-{invoice_number}"}
@@ -105,6 +106,7 @@ class FakeEmailBC(FakeBC):
         return {}
 
     def get_invoice_email_delivery_by_posted_invoice_id(self, invoice_id, *, market=None):
+        self.audit_lookup_ids.append(invoice_id)
         return {
             "status": "Sent",
             "senderEmail": self.sender,
@@ -328,6 +330,7 @@ def test_send_customer_email_requires_native_bc_sent_evidence() -> None:
     assert result["status"] == "sent"
     assert result["sender"] == "consuelo@mtmlogix.com"
     assert bc.sent_row_ids == ["fel-GTFVR0003923", "fel-GTFVR0003924"]
+    assert bc.audit_lookup_ids == ["fel-GTFVR0003923", "fel-GTFVR0003924"]
 
 
 @pytest.mark.parametrize(

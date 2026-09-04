@@ -22,7 +22,6 @@ docker build -f deploy/aws/Dockerfile -t mtm-clickup-invoice-webhook .
 docker run --rm -p 8000:8000 --env-file deploy/aws/env.invoice-webhook.example mtm-clickup-invoice-webhook
 curl http://localhost:8000/healthz
 curl http://localhost:8000/clickup/webhooks/invoice-sync/readiness
-curl http://localhost:8000/clickup/webhooks/storage-invoice-sync/readiness
 curl http://localhost:8000/clickup/webhooks/inspection-invoice-sync/readiness
 ```
 
@@ -51,48 +50,6 @@ Recommended invoice readiness path:
 
 ```text
 /clickup/webhooks/invoice-sync/readiness
-
-## Supplemental Guatemala Almacenaje invoices
-
-Use the isolated route below after the shipment's normal USD invoice status is
-already `Facturada`:
-
-```text
-/clickup/webhooks/storage-invoice-sync
-```
-
-The route reads `Almacenaje al cliente (USD)`, validates it against storage
-days, container count, and the configured USD 27 daily rate, and creates one
-supplemental invoice with reference `<CLICKUP-ID>-ALM` using BC item
-`NAT00000034`. It leaves the existing `Facturada` status unchanged. Exact and
-legacy duplicate matches are recovery-only: the bridge reuses a verified
-FEL-stamped invoice for native BC email and PDF delivery and never creates a
-second invoice.
-
-Keep `CLICKUP_STORAGE_INVOICE_WEBHOOK_APPLY=false` for the first live call. Use
-`CLICKUP_STORAGE_INVOICE_WEBHOOK_TOKEN` for a dedicated credential, or omit it
-to fall back to `CLICKUP_WEBHOOK_TOKEN`.
-
-## Supplemental Guatemala Demurrage and Detention invoices
-
-Use the independent DEM route after the normal USD invoice status is already
-`Facturada`:
-
-```text
-/clickup/webhooks/demurrage-invoice-sync
-```
-
-The route reads `D&D al cliente (USD)`, `Días de D&D`, container count, and
-`Corte de D&D`. It derives the shipment-specific daily rate, reconciles active
-FEL-stamped `NAT00000033` lines, and proposes only the cumulative pending
-difference with references `<CLICKUP-ID>-DEM`, `-DEM-02`, and so on. New DEM
-invoices always use `Invoice to (Consignee's name)`. A historical customer
-change is accepted only when the stamped invoice is explicitly attached in
-`Factura D&D al cliente`; otherwise the customer mismatch blocks issuance.
-
-Keep `CLICKUP_DEMURRAGE_INVOICE_WEBHOOK_APPLY=false` except during a controlled
-issuance. A dedicated `CLICKUP_DEMURRAGE_INVOICE_WEBHOOK_TOKEN` can be set, or
-the route falls back to `CLICKUP_WEBHOOK_TOKEN`.
 ```
 
 Inspection invoices use a dedicated route so their JSON payload is never mixed
@@ -110,8 +67,10 @@ and returns the proposed BC header and lines without changing either system.
 
 - `CLICKUP_WEBHOOK_TOKEN` must be set and used as the ClickUp webhook bearer token.
 - `CLICKUP_INVOICE_WEBHOOK_APPLY=false` keeps the webhook in dry-run mode.
-- `CLICKUP_INVOICE_WEBHOOK_APPLY=true` allows the full flow: status update, BC invoice creation, BC post, FEL stamp, PDF upload, ClickUp comment, and final `Facturada` status.
-- The code does not use the legacy FEL customer-send action. It stamps through BC/FEL and downloads the Business Central `pdfDocument`.
+- `CLICKUP_INVOICE_WEBHOOK_APPLY=true` allows the standard invoice flow to create, post, and FEL-stamp invoices.
+- `CLICKUP_INVOICE_SEND_ENABLED=true` applies one guarded delivery contract to every Guatemala webhook path: standard shipment invoices, inspection invoices when their independent apply mode is enabled, and posted-invoice recovery. Business Central sends the approved branded message from `consuelo@mtmlogix.com`, and the bridge requires native Sent Email evidence before ClickUp is finalized.
+- A send failure writes a Spanish ClickUp error and prevents the task from being marked complete. The Business Central audit makes recovery idempotent and prevents duplicate customer emails.
+- The bridge downloads and validates the Business Central `pdfDocument`; it does not use the legacy Infile customer-delivery email.
 - Configure secrets through AWS App Runner/ECS environment variables or Secrets Manager, not through files committed to git.
 
 ## Manual Special Requirements

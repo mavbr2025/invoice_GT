@@ -136,6 +136,72 @@ class ClickUpClient:
             },
         )
 
+    def get_task_comments(
+        self,
+        task_id: str,
+        *,
+        start: int | None = None,
+        start_id: str | None = None,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {}
+        if start is not None:
+            params["start"] = start
+        if start_id is not None:
+            params["start_id"] = start_id
+        return self._request(
+            "GET",
+            f"https://api.clickup.com/api/v2/task/{task_id}/comment",
+            params=params or None,
+        )
+
+    def create_task_comment_with_mentions(
+        self,
+        task_id: str,
+        *,
+        comment_text: str,
+        user_ids: tuple[int, ...] | list[int],
+        notify_all: bool = False,
+    ) -> dict[str, Any]:
+        comment: list[dict[str, Any]] = []
+        for index, user_id in enumerate(user_ids):
+            if index:
+                comment.append({"text": " y "})
+            comment.append({"type": "tag", "user": {"id": int(user_id)}})
+        if comment:
+            comment.append({"text": ", "})
+        comment.append({"text": comment_text})
+        return self._request(
+            "POST",
+            f"https://api.clickup.com/api/v2/task/{task_id}/comment",
+            json={"comment": comment, "notify_all": notify_all},
+        )
+
+    def ensure_task_comment_with_mentions(
+        self,
+        task_id: str,
+        *,
+        comment_text: str,
+        user_ids: tuple[int, ...] | list[int],
+        notify_all: bool = False,
+    ) -> dict[str, Any]:
+        response = self.get_task_comments(task_id)
+        for existing in response.get("comments") or []:
+            existing_text = str(existing.get("comment_text") or "")
+            segment_text = "".join(
+                str(segment.get("text") or "")
+                for segment in (existing.get("comment") or [])
+                if isinstance(segment, dict) and segment.get("text") is not None
+            )
+            if comment_text in existing_text or comment_text in segment_text:
+                return {"status": "existing", "comment": existing}
+        created = self.create_task_comment_with_mentions(
+            task_id,
+            comment_text=comment_text,
+            user_ids=user_ids,
+            notify_all=notify_all,
+        )
+        return {"status": "created", "comment": created}
+
     def attach_file_to_task(
         self,
         task_id: str,

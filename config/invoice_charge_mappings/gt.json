@@ -16,6 +16,15 @@
       "tax_group": "NO IVA"
     },
     {
+      "charge_name": "IMO Surcharge",
+      "clickup_field_id": "809114c7-dccd-4bf7-8dc8-6fefb049ae00",
+      "clickup_field_name": "IMO Surcharge",
+      "bc_item_number": "INT000000026",
+      "bc_description": "IMO SURCHARGE",
+      "quantity_basis": "container_count",
+      "tax_group": "NO IVA"
+    },
+    {
       "charge_name": "Origin Charges",
       "clickup_field_id": "fe89391f-35e7-429e-a03c-b19f529d79e5",
       "clickup_field_name": "Origin Charges",

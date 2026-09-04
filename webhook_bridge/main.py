@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
 from urllib.parse import parse_qsl
 
 from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.responses import FileResponse
 
 from business_central_client.client import BusinessCentralClient
 from business_central_client.config import Settings as BusinessCentralSettings
@@ -49,11 +51,28 @@ from inspection_invoices.service import (
 app = FastAPI(title="ClickUp to Business Central Customer Bridge")
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+EMAIL_LOGO_PATH = (
+    Path(__file__).resolve().parent
+    / "assets"
+    / "mtm-logix-email-logo-porcelain-v1.png"
+)
 
 
 @app.get("/healthz")
 def healthz() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/assets/mtm-logix-email-logo-porcelain-v1.png", include_in_schema=False)
+def mtm_invoice_email_logo() -> FileResponse:
+    return FileResponse(
+        EMAIL_LOGO_PATH,
+        media_type="image/png",
+        headers={
+            "Cache-Control": "public, max-age=31536000, immutable",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @app.get("/clickup/webhooks/invoice-sync/readiness")
@@ -159,14 +178,17 @@ def demurrage_invoice_sync_readiness() -> dict[str, Any]:
 @app.get("/clickup/webhooks/inspection-invoice-sync/readiness")
 def inspection_invoice_sync_readiness() -> dict[str, Any]:
     missing_runtime_config = [
-        name
-        for name in ("CLICKUP_WEBHOOK_TOKEN", "CLICKUP_ACCESS_TOKEN")
-        if not os.getenv(name, "").strip()
+        name for name in ("CLICKUP_ACCESS_TOKEN",) if not os.getenv(name, "").strip()
     ]
+    if not _inspection_invoice_webhook_token():
+        missing_runtime_config.append(
+            "INSPECTION_INVOICE_WEBHOOK_TOKEN or CLICKUP_WEBHOOK_TOKEN"
+        )
     return {
         "status": "not_ready" if missing_runtime_config else "ready",
         "missing_runtime_config": missing_runtime_config,
         "apply_mode": _env_bool("INSPECTION_INVOICE_WEBHOOK_APPLY", default=False),
+        "customer_email_enabled": should_send_invoice_customer_email(),
         "market": os.getenv("INSPECTION_INVOICE_MARKET", "GT").strip().upper() or "GT",
         "currency": os.getenv("INSPECTION_INVOICE_CURRENCY", "USD").strip().upper() or "USD",
         "payload_field_id": os.getenv(
@@ -510,34 +532,6 @@ async def clickup_invoice_sync(
         invoice_result: dict[str, Any] | None = None
         if transition_result.get("status") in {"ready_to_update", "already_ready_to_invoice"}:
             if apply_mode:
-                try:
-                    validate_invoice_pdf_field_on_task(summary)
-                except Exception as exc:
-                    invoice_result = {
-                        "status": "missing_invoice_pdf_field",
-                        "message": str(exc),
-                        "market": summary.get("market"),
-                        "task_status": summary.get("status"),
-                    }
-                    error_comment = _write_invoice_error_comment(
-                        clickup=clickup,
-                        clickup_summary=summary,
-                        stage="validacion_clickup",
-                        invoice_result=invoice_result,
-                    )
-                    if error_comment:
-                        invoice_result = {**invoice_result, "error_comment": error_comment}
-                    actions.append("validate_invoice_pdf_field")
-                    if error_comment:
-                        actions.append("comment_invoice_error")
-                    response_payload = {
-                        "mode": "apply",
-                        "action": ",".join(actions) or "none",
-                        "transition": transition_result,
-                        "result": invoice_result,
-                    }
-                    return response_payload
-
                 invoice_result = issue_clickup_bc_sales_invoice(
                     clickup_summary=summary,
                     bc_client=bc,
@@ -545,39 +539,17 @@ async def clickup_invoice_sync(
                 )
                 actions.extend(invoice_result.get("completed_stages") or ["create_sales_invoice"])
                 if invoice_result.get("status") == "applied":
-                    if should_send_invoice_customer_email():
-                        try:
-                            customer_email_delivery = send_issued_invoice_customer_emails(
-                                bc_client=bc,
-                                invoice_result=invoice_result,
-                                settings=settings,
-                            )
-                        except Exception as exc:
-                            logger.exception(
-                                "Business Central customer email failed after invoice creation task_id=%s",
-                                summary.get("task_id"),
-                            )
-                            invoice_result = {
-                                **invoice_result,
-                                "status": "failed_post_creation",
-                                "failed_stage": "envio_cliente",
-                                "message": str(exc),
-                            }
-                            error_comment = _write_invoice_error_comment(
-                                clickup=clickup,
-                                clickup_summary=summary,
-                                stage="envio_cliente",
-                                invoice_result=invoice_result,
-                            )
-                            if error_comment:
-                                invoice_result = {**invoice_result, "error_comment": error_comment}
-                                actions.append("comment_invoice_error")
-                        else:
-                            invoice_result = {
-                                **invoice_result,
-                                "customer_email_delivery": customer_email_delivery,
-                            }
-                            actions.append("send_customer_email_from_bc")
+                    invoice_result, customer_email_action = _deliver_gt_customer_email_if_enabled(
+                        clickup=clickup,
+                        bc_client=bc,
+                        clickup_summary=summary,
+                        invoice_result=invoice_result,
+                        settings=settings,
+                    )
+                    if customer_email_action == "sent":
+                        actions.append("send_customer_email_from_bc")
+                    elif customer_email_action == "failed" and invoice_result.get("error_comment"):
+                        actions.append("comment_invoice_error")
 
                     if invoice_result.get("status") != "applied":
                         pass
@@ -694,6 +666,10 @@ async def clickup_storage_invoice_sync(
     if not task_id:
         return {"status": "ignored", "reason": "missing_task_id"}
 
+    clickup: ClickUpClient | None = None
+    summary: dict[str, Any] | None = None
+    issued: dict[str, Any] | None = None
+    error_stage = "validacion_clickup"
     try:
         clickup = ClickUpClient(ClickUpSettings.from_env())
         bc = BusinessCentralClient(BusinessCentralSettings.from_env())
@@ -725,12 +701,27 @@ async def clickup_storage_invoice_sync(
             include_subtasks=True,
         )
         if parent_id and invoice_task is None:
+            blocked = {
+                "status": "parent_lookup_failed",
+                "message": "No fue posible resolver la tarea madre para validar la factura de almacenaje.",
+            }
+            error_comment = _write_invoice_error_comment(
+                clickup=clickup,
+                clickup_summary={
+                    "task_id": str(task.get("id") or task_id),
+                    "custom_id": task.get("custom_id"),
+                    "name": task.get("name"),
+                },
+                stage="validacion_clickup",
+                invoice_result=blocked,
+            )
             result = {
                 "status": "blocked",
                 "mode": "dry_run",
                 "reason": "parent_lookup_failed",
                 "task_id": task.get("id"),
                 "parent_task_id": parent_id,
+                "error_comment": error_comment,
             }
             _log_webhook_result(task_id=str(task.get("id") or task_id), result=result)
             return result
@@ -749,6 +740,15 @@ async def clickup_storage_invoice_sync(
         preview_status = str(preview.get("status") or "").strip()
         apply_eligible_statuses = {"dry_run_ready", "duplicate_invoice"}
         if not apply_mode or preview_status not in apply_eligible_statuses:
+            if preview_status not in {"dry_run_ready", "duplicate_invoice", "fully_invoiced"}:
+                error_comment = _write_invoice_error_comment(
+                    clickup=clickup,
+                    clickup_summary=summary,
+                    stage="validacion_clickup",
+                    invoice_result=preview,
+                )
+                if error_comment:
+                    preview = {**preview, "error_comment": error_comment}
             result = {
                 "status": "processed" if preview_status in apply_eligible_statuses else "blocked",
                 "mode": "dry_run",
@@ -759,7 +759,7 @@ async def clickup_storage_invoice_sync(
             _log_webhook_result(task_id=str(task.get("id") or task_id), result=result)
             return result
 
-        validate_invoice_pdf_field_on_task(summary)
+        error_stage = "creacion_bc"
         issued = issue_clickup_bc_storage_invoice(
             clickup_summary=summary,
             bc_client=bc,
@@ -767,6 +767,14 @@ async def clickup_storage_invoice_sync(
             storage_settings=storage_settings,
         )
         if issued.get("status") != "applied":
+            error_comment = _write_invoice_error_comment(
+                clickup=clickup,
+                clickup_summary=summary,
+                stage=issued.get("failed_stage") or "creacion_bc",
+                invoice_result=issued,
+            )
+            if error_comment:
+                issued = {**issued, "error_comment": error_comment}
             result = {
                 "status": "failed",
                 "mode": "apply",
@@ -778,6 +786,7 @@ async def clickup_storage_invoice_sync(
 
         actions = list(issued.get("completed_stages") or [])
         if should_send_invoice_customer_email():
+            error_stage = "envio_cliente"
             customer_email_delivery = send_issued_invoice_customer_emails(
                 bc_client=bc,
                 invoice_result=issued,
@@ -786,6 +795,7 @@ async def clickup_storage_invoice_sync(
             issued = {**issued, "customer_email_delivery": customer_email_delivery}
             actions.append("send_customer_email_from_bc")
 
+        error_stage = "entrega_clickup"
         delivery = finalize_clickup_issued_invoices(
             clickup=clickup,
             bc_client=bc,
@@ -812,6 +822,19 @@ async def clickup_storage_invoice_sync(
         raise
     except Exception as exc:
         logger.exception("Storage invoice webhook failed task_id=%s", task_id)
+        if clickup is not None and summary is not None:
+            failed_result = {
+                **(issued or {}),
+                "status": "failed_post_creation" if issued else "failed",
+                "failed_stage": error_stage,
+                "message": str(exc),
+            }
+            _write_invoice_error_comment(
+                clickup=clickup,
+                clickup_summary=summary,
+                stage=error_stage,
+                invoice_result=failed_result,
+            )
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
@@ -842,6 +865,10 @@ async def clickup_demurrage_invoice_sync(
     if not task_id:
         return {"status": "ignored", "reason": "missing_task_id"}
 
+    clickup: ClickUpClient | None = None
+    summary: dict[str, Any] | None = None
+    issued: dict[str, Any] | None = None
+    error_stage = "validacion_clickup"
     try:
         clickup = ClickUpClient(ClickUpSettings.from_env())
         bc = BusinessCentralClient(BusinessCentralSettings.from_env())
@@ -873,12 +900,27 @@ async def clickup_demurrage_invoice_sync(
             include_subtasks=True,
         )
         if parent_id and invoice_task is None:
+            blocked = {
+                "status": "parent_lookup_failed",
+                "message": "No fue posible resolver la tarea madre para validar la factura de demoras.",
+            }
+            error_comment = _write_invoice_error_comment(
+                clickup=clickup,
+                clickup_summary={
+                    "task_id": str(task.get("id") or task_id),
+                    "custom_id": task.get("custom_id"),
+                    "name": task.get("name"),
+                },
+                stage="validacion_clickup",
+                invoice_result=blocked,
+            )
             result = {
                 "status": "blocked",
                 "mode": "dry_run",
                 "reason": "parent_lookup_failed",
                 "task_id": task.get("id"),
                 "parent_task_id": parent_id,
+                "error_comment": error_comment,
             }
             _log_webhook_result(task_id=str(task.get("id") or task_id), result=result)
             return result
@@ -898,6 +940,15 @@ async def clickup_demurrage_invoice_sync(
         preview_status = str(preview.get("status") or "").strip()
         apply_eligible_statuses = {"dry_run_ready", "duplicate_invoice"}
         if not apply_mode or preview_status not in apply_eligible_statuses:
+            if preview_status not in {"dry_run_ready", "duplicate_invoice", "fully_invoiced"}:
+                error_comment = _write_invoice_error_comment(
+                    clickup=clickup,
+                    clickup_summary=summary,
+                    stage="validacion_clickup",
+                    invoice_result=preview,
+                )
+                if error_comment:
+                    preview = {**preview, "error_comment": error_comment}
             result = {
                 "status": "processed" if preview_status in apply_eligible_statuses else "blocked",
                 "mode": "dry_run",
@@ -908,7 +959,9 @@ async def clickup_demurrage_invoice_sync(
             _log_webhook_result(task_id=str(task.get("id") or task_id), result=result)
             return result
 
+        error_stage = "validacion_clickup"
         validate_invoice_pdf_field_on_task(summary)
+        error_stage = "creacion_bc"
         issued = issue_clickup_bc_demurrage_invoice(
             clickup_summary=summary,
             bc_client=bc,
@@ -916,6 +969,14 @@ async def clickup_demurrage_invoice_sync(
             demurrage_settings=demurrage_settings,
         )
         if issued.get("status") != "applied":
+            error_comment = _write_invoice_error_comment(
+                clickup=clickup,
+                clickup_summary=summary,
+                stage=issued.get("failed_stage") or "creacion_bc",
+                invoice_result=issued,
+            )
+            if error_comment:
+                issued = {**issued, "error_comment": error_comment}
             result = {
                 "status": "failed",
                 "mode": "apply",
@@ -927,6 +988,7 @@ async def clickup_demurrage_invoice_sync(
 
         actions = list(issued.get("completed_stages") or [])
         if should_send_invoice_customer_email():
+            error_stage = "envio_cliente"
             customer_email_delivery = send_issued_invoice_customer_emails(
                 bc_client=bc,
                 invoice_result=issued,
@@ -935,6 +997,7 @@ async def clickup_demurrage_invoice_sync(
             issued = {**issued, "customer_email_delivery": customer_email_delivery}
             actions.append("send_customer_email_from_bc")
 
+        error_stage = "entrega_clickup"
         delivery = finalize_clickup_issued_invoices(
             clickup=clickup,
             bc_client=bc,
@@ -961,6 +1024,19 @@ async def clickup_demurrage_invoice_sync(
         raise
     except Exception as exc:
         logger.exception("Demurrage invoice webhook failed task_id=%s", task_id)
+        if clickup is not None and summary is not None:
+            failed_result = {
+                **(issued or {}),
+                "status": "failed_post_creation" if issued else "failed",
+                "failed_stage": error_stage,
+                "message": str(exc),
+            }
+            _write_invoice_error_comment(
+                clickup=clickup,
+                clickup_summary=summary,
+                stage=error_stage,
+                invoice_result=failed_result,
+            )
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
@@ -973,9 +1049,9 @@ async def clickup_inspection_invoice_sync(
     x_webhook_token: str | None = Header(default=None, alias="X-Webhook-Token"),
     authorization: str | None = Header(default=None, alias="Authorization"),
 ) -> dict[str, Any]:
-    expected_token = os.getenv("CLICKUP_WEBHOOK_TOKEN", "").strip()
+    expected_token = _inspection_invoice_webhook_token()
     if not expected_token:
-        raise HTTPException(status_code=500, detail="CLICKUP_WEBHOOK_TOKEN is not configured.")
+        raise HTTPException(status_code=500, detail="Inspection invoice webhook token is not configured.")
     provided_token = _extract_webhook_token(
         x_webhook_token=x_webhook_token,
         authorization=authorization,
@@ -1024,12 +1100,30 @@ async def clickup_inspection_invoice_sync(
             return result
 
         summary = summarize_task_for_customer_mapping(task)
+        invoice_settings = InvoiceAutomationSettings.from_env()
+        issued, customer_email_action = _deliver_gt_customer_email_if_enabled(
+            clickup=clickup,
+            bc_client=bc,
+            clickup_summary=summary,
+            invoice_result=issued,
+            settings=invoice_settings,
+        )
+        if customer_email_action == "failed":
+            result = {
+                "status": "failed",
+                "mode": "apply",
+                "task_id": task.get("id"),
+                "result": issued,
+            }
+            _log_webhook_result(task_id=str(task.get("id") or task_id), result=result)
+            return result
+
         delivery = finalize_clickup_issued_invoices(
             clickup=clickup,
             bc_client=bc,
             clickup_summary=summary,
             invoice_result=issued,
-            settings=InvoiceAutomationSettings.from_env(),
+            settings=invoice_settings,
             workspace_id=team_id,
             mark_status=False,
         )
@@ -1043,6 +1137,7 @@ async def clickup_inspection_invoice_sync(
             "delivery": delivery,
             "writeback": writeback,
             "final_status_update": final_status,
+            "customer_email_action": customer_email_action,
         }
         _log_webhook_result(task_id=str(task.get("id") or task_id), result=result)
         return result
@@ -1147,6 +1242,24 @@ async def clickup_invoice_deliver_posted(
             "created_invoices": [],
             "completed_stages": ["deliver_existing_posted_invoice"],
         }
+        invoice_result, customer_email_action = _deliver_gt_customer_email_if_enabled(
+            clickup=clickup,
+            bc_client=bc,
+            clickup_summary=summary,
+            invoice_result=invoice_result,
+            settings=settings,
+        )
+        if customer_email_action == "failed":
+            response = {
+                "status": "failed",
+                "action": "comment_invoice_error"
+                if invoice_result.get("error_comment")
+                else "customer_email_failed",
+                "result": invoice_result,
+            }
+            _log_webhook_result(task_id=task_id, result=response)
+            return response
+
         delivery_result = finalize_clickup_issued_invoices(
             clickup=clickup,
             bc_client=bc,
@@ -1164,7 +1277,14 @@ async def clickup_invoice_deliver_posted(
         }
         response = {
             "status": "processed",
-            "action": "deliver_existing_posted_invoices",
+            "action": ",".join(
+                action
+                for action in (
+                    "send_customer_email_from_bc" if customer_email_action == "sent" else "",
+                    "deliver_existing_posted_invoices",
+                )
+                if action
+            ),
             "result": result,
         }
         _log_webhook_result(task_id=task_id, result=response)
@@ -1174,6 +1294,53 @@ async def clickup_invoice_deliver_posted(
     except Exception as exc:  # pragma: no cover - exercised in runtime recovery
         logger.exception("ClickUp posted invoice delivery recovery failed for task_id=%s", task_id)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+def _deliver_gt_customer_email_if_enabled(
+    *,
+    clickup: ClickUpClient,
+    bc_client: BusinessCentralClient,
+    clickup_summary: dict[str, Any],
+    invoice_result: dict[str, Any],
+    settings: InvoiceAutomationSettings,
+) -> tuple[dict[str, Any], str]:
+    market = str(invoice_result.get("market") or settings.supported_market or "").strip().upper()
+    if market != "GT":
+        return invoice_result, "not_applicable"
+    if not should_send_invoice_customer_email():
+        return invoice_result, "disabled"
+
+    try:
+        customer_email_delivery = send_issued_invoice_customer_emails(
+            bc_client=bc_client,
+            invoice_result=invoice_result,
+            settings=settings,
+        )
+    except Exception as exc:
+        logger.exception(
+            "Business Central customer email failed after GT invoice creation task_id=%s",
+            clickup_summary.get("task_id"),
+        )
+        failed_result = {
+            **invoice_result,
+            "status": "failed_post_creation",
+            "failed_stage": "envio_cliente",
+            "message": str(exc),
+        }
+        error_comment = _write_invoice_error_comment(
+            clickup=clickup,
+            clickup_summary=clickup_summary,
+            stage="envio_cliente",
+            invoice_result=failed_result,
+        )
+        if error_comment:
+            failed_result = {**failed_result, "error_comment": error_comment}
+        return failed_result, "failed"
+
+    return {
+        **invoice_result,
+        "customer_email_delivery": customer_email_delivery,
+    }, "sent"
 
 
 def _write_invoice_error_comment(
@@ -1189,6 +1356,21 @@ def _write_invoice_error_comment(
         invoice_result=invoice_result,
     )
     try:
+        ensure_with_mentions = getattr(clickup, "ensure_task_comment_with_mentions", None)
+        if callable(ensure_with_mentions):
+            ensured = ensure_with_mentions(
+                clickup_summary["task_id"],
+                comment_text=comment_text,
+                user_ids=_invoice_error_reviewer_user_ids(),
+                notify_all=False,
+            )
+            if isinstance(ensured, dict) and isinstance(ensured.get("comment"), dict):
+                return ensured["comment"]
+            return ensured
+
+        # Compatibility fallback for older ClickUp adapters. Current production
+        # uses the native-mention path above; this still preserves the complete
+        # error explanation if an older adapter is supplied during a rollout.
         return clickup.create_task_comment(
             clickup_summary["task_id"],
             comment_text=comment_text,
@@ -1238,11 +1420,34 @@ def _build_invoice_error_comment(
         f"ESTADO DEL PROCESO: {status}\n"
         f"DETALLE: {message}"
         f"{invoice_line}\n\n"
-        "ACCION REQUERIDA: REVISAR EL DETALLE, CORREGIR LA CAUSA Y REEJECUTAR EL WEBHOOK "
-        "O ESCALAR A SISTEMAS. LA AUTOMATIZACION NO DEBE CONSIDERARSE COMPLETA HASTA QUE "
+        "REVISION ASIGNADA: CONSUELO DE VELASQUEZ Y CARLOS HUERTA.\n"
+        "ACCION REQUERIDA: REVISAR EL DETALLE Y CORREGIR LA CAUSA. NO REINTENTAR LA EMISION "
+        "SIN AUDITAR PRIMERO BUSINESS CENTRAL, FEL/SAT, CORREO Y CLICKUP. SI LA CAUSA REQUIERE "
+        "UN CAMBIO DE CODIGO, CORREGIRLO Y SINCRONIZAR LA MISMA REVISION EN LOCAL, AWS Y GITHUB "
+        "ANTES DE REEJECUTAR. LA AUTOMATIZACION NO DEBE CONSIDERARSE COMPLETA HASTA QUE "
         "LOS PDF ESTEN EN EL CAMPO INVOICE TO CLIENT, EL COMENTARIO CON REFERENCIAS BC EXISTA "
         "Y EL ESTATUS QUEDE EN FACTURADA."
     )
+
+
+def _invoice_error_reviewer_user_ids() -> tuple[int, ...]:
+    raw_value = os.getenv(
+        "CLICKUP_INVOICE_ERROR_REVIEWER_USER_IDS",
+        "89253188,61521165",
+    )
+    reviewer_ids: list[int] = []
+    for raw_id in raw_value.split(","):
+        candidate = raw_id.strip()
+        if not candidate:
+            continue
+        try:
+            reviewer_id = int(candidate)
+        except ValueError:
+            logger.error("Ignoring invalid ClickUp invoice error reviewer id: %s", candidate)
+            continue
+        if reviewer_id > 0 and reviewer_id not in reviewer_ids:
+            reviewer_ids.append(reviewer_id)
+    return tuple(reviewer_ids) or (89253188, 61521165)
 
 
 def _invoice_numbers_from_result(invoice_result: dict[str, Any]) -> list[str]:
@@ -1498,6 +1703,14 @@ def _storage_invoice_webhook_token() -> str:
     """Use an isolated credential for supplemental Almacenaje invoices when configured."""
     return (
         os.getenv("CLICKUP_STORAGE_INVOICE_WEBHOOK_TOKEN", "").strip()
+        or os.getenv("CLICKUP_WEBHOOK_TOKEN", "").strip()
+    )
+
+
+def _inspection_invoice_webhook_token() -> str:
+    """Prefer an isolated credential for Magna inspection invoices."""
+    return (
+        os.getenv("INSPECTION_INVOICE_WEBHOOK_TOKEN", "").strip()
         or os.getenv("CLICKUP_WEBHOOK_TOKEN", "").strip()
     )
 

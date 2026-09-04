@@ -15,7 +15,8 @@ approved MTM invoice layout.
 
 ## Flow
 
-1. ClickUp starts the normal invoice webhook.
+1. ClickUp starts a Guatemala invoice webhook: standard shipment, inspection,
+   or posted-invoice recovery.
 2. Business Central creates, posts, and FEL stamps each invoice.
 3. Business Central verifies `Stamp Received`, renders the approved PDF, and
    sends it through the `MTM Invoice Customer Delivery` email scenario.
@@ -35,7 +36,7 @@ retried; an accepted send without native evidence is held for review.
 
 ## Required Business Central Configuration
 
-1. Publish `MTM Customer Invoicing Sync` version `0.1.8.32`.
+1. Publish `MTM Customer Invoicing Sync` version `0.1.8.43` or later.
 2. In **Email Accounts**, configure the Microsoft 365 account or shared mailbox
    `consuelo@mtmlogix.com`. The BC service identity must have permission to
    send from that mailbox.
@@ -51,6 +52,49 @@ retried; an accepted send without native evidence is held for review.
    legacy PDF when a DTE is stamped. There must be one customer-facing delivery
    path: this BC email scenario.
 
+## Controlled Internal Canary
+
+Before enabling customer delivery, the separate
+`SendApprovedInvoiceTestEmailToMario` action may send an already posted and
+FEL-stamped invoice to `mario@mtmlogix.com`. It uses the same Consuelo scenario,
+Command Era body, `FacturaGTM` PDF, and native Sent Email verification as the
+customer path. It does not create or post an invoice, does not read or change
+the customer's email, and does not mark the customer-delivery audit as sent.
+The posted-invoice API reports invoice-scoped canary evidence as `Sent`,
+`Outbox`, `NotFound`, or a configuration error. The canary command checks this
+evidence before sending, allows additional time for PDF rendering and native
+delivery, and never retries an ambiguous timeout automatically.
+An existing failed outbox record requires the operator-only
+`--retry-failed` flag; a queued, unknown, timed-out, or already-sent message
+cannot be retried by the canary command.
+
+For unattended webhook delivery, the SMTP connector uses the dedicated
+`MTM BC Invoice SMTP Sender` Microsoft Entra application. The application is
+registered as an Exchange service principal and receives the Exchange
+Application RBAC role `Application SMTP.SendAsApp` through an exact recipient
+scope for Consuelo's mailbox. The Entra application intentionally has no
+Exchange Online application-role claim and does not receive mailbox
+`FullAccess`; adding the `SMTP.SendAsApp` Entra claim would make Exchange apply
+the legacy mailbox-permission check instead of the scoped RBAC authorization.
+The mailbox identity is `connie@mtmlogix.com`; the approved sender address
+`consuelo@mtmlogix.com` is its secondary SMTP alias. Interactive delegated OAuth
+is not suitable for an unattended webhook because it depends on a user's
+refreshable sign-in session.
+
+Validate the production credential without sending mail before any canary:
+
+```text
+python scripts/check_bc_smtp_oauth_preflight.py \
+  --tenant-id <tenant-id> \
+  --client-id <client-id> \
+  --client-secret-file <secret-file> \
+  --mailbox connie@mtmlogix.com
+```
+
+The preflight must report SMTP code `235`, `sent_email=false`, and an empty
+token `roles` array. A non-empty roles claim is a release blocker for this
+mailbox-scoped RBAC design.
+
 ## AWS Feature Gate
 
 Keep this setting false during setup and controlled testing:
@@ -60,8 +104,56 @@ CLICKUP_INVOICE_SEND_ENABLED=false
 ```
 
 Set it to `true` in the Elastic Beanstalk environment only after the six BC
-configuration checks above pass. A normal webhook then sends the email after
-stamping and before ClickUp finalization.
+configuration checks above pass. The gate then applies to every Guatemala
+webhook-issued invoice: standard shipment invoices, inspection invoices when
+`INSPECTION_INVOICE_WEBHOOK_APPLY=true`, and posted-invoice recovery. Each path
+sends after stamping and before ClickUp finalization.
+
+`INSPECTION_INVOICE_WEBHOOK_APPLY` remains an independent issuance control.
+Enabling customer email delivery does not enable inspection invoice creation.
+
+## Manually Posted Business Central Invoices
+
+Version `0.1.8.43` adds a Business Central-native downstream queue for sales
+invoices posted directly in the Guatemala company. The posting transaction only
+adds a durable queue row. It never renders a PDF, calls SMTP, or waits for FEL.
+
+Assign the extension permission set `MTM CUST INV API` to the Business Central
+service principal for company `MTM_GT_PROD`. The assignment must be made on the
+**Microsoft Entra Applications** card while the application is temporarily
+disabled, then the application must be re-enabled. Without this direct table-data
+permission, the manual-email setup API returns `403` even though the API page and
+codeunit permissions are present in the extension.
+
+The extension installs with both controls disabled and does not backfill
+historical invoices. Activate it in two explicit phases from **MTM Manual
+Invoice Email Setup**:
+
+1. Choose **Start Capture Only**. Newly posted invoices enter the queue, and the
+   recurring job waits for `Stamp Received`, but no customer email is sent.
+2. Inspect the queue and the first controlled posting. When the posted invoice
+   reaches **Ready to Send**, choose **Enable Customer Send**.
+
+After customer send is enabled, the job calls the same
+`SendApprovedInvoiceEmail` routine used by the webhook. Therefore manually
+posted standard, inspection, air, NAT, and INT sales invoices use the same
+Consuelo sender, Command Era body, `FacturaGTM` PDF, recipient resolution, and
+native Sent Email evidence.
+
+Queue states are operational controls:
+
+- `Waiting for FEL Stamp`: BC will check again without treating the delay as an
+  email failure.
+- `Ready to Send`: the invoice is stamped, but customer sending is disabled.
+- `Sent`: the exact BC Sent Email record and sender account were verified.
+- `Review Required`: an operator must correct the recorded cause and explicitly
+  reset the row; the job will not retry an ambiguous send automatically.
+- `Cancelled`: the invoice was cancelled before customer delivery.
+
+The recurring job is created only by an explicit setup activation. Existing
+posted invoices are not inserted into this queue. API operators can read
+`manualInvoiceEmailSetups` and `manualInvoiceEmailQueueEntries`; setup changes
+are exposed only through the named service actions, not arbitrary PATCH writes.
 
 ## Failure Handling
 
@@ -76,3 +168,6 @@ stamping and before ClickUp finalization.
 - Do not create another invoice to recover a send failure. Correct the mailbox,
   report, or recipient and rerun the controlled delivery path; the existing
   `Sent` audit prevents duplicate emails.
+- For manually posted invoices, use **Reset Selected for Operator Retry** only
+  after the recorded cause is fixed. An accepted send without exact native
+  evidence must remain under review rather than being automatically resent.

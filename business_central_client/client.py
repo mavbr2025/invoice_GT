@@ -62,6 +62,7 @@ class BusinessCentralClient:
         params: dict[str, Any] | None = None,
         json: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
+        timeout_seconds: int | None = None,
     ) -> dict[str, Any]:
         request_headers = self._headers()
         if headers:
@@ -72,7 +73,7 @@ class BusinessCentralClient:
             headers=request_headers,
             params=params,
             json=json,
-            timeout=self.settings.timeout_seconds,
+            timeout=timeout_seconds or self.settings.timeout_seconds,
         )
         _raise_for_status_with_detail(response)
         if not response.content:
@@ -599,6 +600,7 @@ class BusinessCentralClient:
         *,
         company_id: str | None = None,
         market: str | None = None,
+        timeout_seconds: int | None = None,
     ) -> dict[str, Any]:
         company = self._resolve_company_id(company_id=company_id, market=market)
         if not company:
@@ -613,7 +615,7 @@ class BusinessCentralClient:
         else:
             url = self._expand_relative_path(normalized_path, company)
 
-        return self._request("POST", url, json=payload)
+        return self._request("POST", url, json=payload, timeout_seconds=timeout_seconds)
 
     def find_entities(
         self,
@@ -836,6 +838,23 @@ class BusinessCentralClient:
             raise ValueError(f"More than one posted invoice FEL row matched {invoice_number}.")
         return rows[0]
 
+    def get_posted_invoice_fel_descriptions(
+        self,
+        *,
+        filters: str,
+        top: int = 100,
+        order_by: str | None = None,
+        company_id: str | None = None,
+        market: str | None = None,
+    ) -> list[dict[str, Any]]:
+        return self._get_posted_invoice_fel_descriptions(
+            filters=filters,
+            top=top,
+            order_by=order_by,
+            company_id=company_id,
+            market=market,
+        )
+
     def get_posted_credit_memo_fel_description_by_number(
         self,
         credit_memo_number: str,
@@ -897,7 +916,56 @@ class BusinessCentralClient:
             "SendApprovedInvoiceEmail",
             company_id=company_id,
             market=market,
+            timeout_seconds=max(self.settings.timeout_seconds, 120),
         )
+
+    def send_posted_invoice_test_email_to_mario(
+        self,
+        posted_invoice_fel_row_id: str,
+        *,
+        company_id: str | None = None,
+        market: str | None = None,
+    ) -> dict[str, Any]:
+        """Send an existing approved invoice to the fixed internal canary recipient."""
+        return self._post_posted_invoice_fel_action(
+            posted_invoice_fel_row_id,
+            "SendApprovedInvoiceTestEmailToMario",
+            company_id=company_id,
+            market=market,
+            timeout_seconds=max(self.settings.timeout_seconds, 120),
+        )
+
+    def get_invoice_email_canary_evidence_by_number(
+        self,
+        invoice_number: str,
+        *,
+        company_id: str | None = None,
+        market: str | None = None,
+    ) -> dict[str, Any] | None:
+        company = self._resolve_company_id(company_id=company_id, market=market)
+        if not company:
+            raise ValueError(
+                "A company ID is required. Set BC_COMPANY_ID, configure "
+                "BC_MARKET_<CODE>_COMPANY_ID, or pass company_id explicitly."
+            )
+        escaped = invoice_number.replace("'", "''")
+        url = (
+            f"https://api.businesscentral.dynamics.com/v2.0/{self.settings.environment}"
+            f"/api/mtmlogix/invoiceSync/v1.0/companies({company})/"
+            "invoiceEmailCanaryEvidenceEntries"
+        )
+        rows = self._request(
+            "GET",
+            url,
+            params={"$top": 2, "$filter": f"number eq '{escaped}'"},
+        ).get("value", [])
+        if not rows:
+            return None
+        if len(rows) > 1:
+            raise ValueError(
+                f"More than one Business Central canary evidence row matched {invoice_number}."
+            )
+        return rows[0]
 
     def get_invoice_email_delivery_by_posted_invoice_id(
         self,
@@ -1014,6 +1082,7 @@ class BusinessCentralClient:
         *,
         filters: str,
         top: int = 1,
+        order_by: str | None = None,
         company_id: str | None = None,
         market: str | None = None,
     ) -> list[dict[str, Any]]:
@@ -1027,11 +1096,10 @@ class BusinessCentralClient:
             f"https://api.businesscentral.dynamics.com/v2.0/{self.settings.environment}"
             f"/api/mtmlogix/invoiceSync/v1.0/companies({company})/postedInvoiceFelDescriptions"
         )
-        return self._request(
-            "GET",
-            url,
-            params={"$top": top, "$filter": filters},
-        ).get("value", [])
+        params: dict[str, Any] = {"$top": top, "$filter": filters}
+        if order_by:
+            params["$orderby"] = order_by
+        return self._request("GET", url, params=params).get("value", [])
 
     def _get_invoice_email_deliveries(
         self,
@@ -1113,15 +1181,25 @@ class BusinessCentralClient:
         body: dict[str, Any] | None = None,
         company_id: str | None = None,
         market: str | None = None,
+        timeout_seconds: int | None = None,
     ) -> dict[str, Any]:
+        path = (
+            "/api/mtmlogix/invoiceSync/v1.0/companies({company_id})/"
+            f"postedInvoiceFelDescriptions({posted_invoice_fel_row_id})/Microsoft.NAV.{action_name}"
+        )
+        if timeout_seconds is None:
+            return self.post_to_company(
+                path,
+                body or {},
+                company_id=company_id,
+                market=market,
+            )
         return self.post_to_company(
-            (
-                "/api/mtmlogix/invoiceSync/v1.0/companies({company_id})/"
-                f"postedInvoiceFelDescriptions({posted_invoice_fel_row_id})/Microsoft.NAV.{action_name}"
-            ),
+            path,
             body or {},
             company_id=company_id,
             market=market,
+            timeout_seconds=timeout_seconds,
         )
 
     def _post_posted_credit_memo_fel_action(
