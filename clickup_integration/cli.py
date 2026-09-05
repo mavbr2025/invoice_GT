@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import secrets
+
 import argparse
 import json
 import os
@@ -246,9 +248,10 @@ def main() -> None:
         return
 
     if args.command == "oauth-listen":
+        state = args.state or secrets.token_urlsafe(32)
         print("Open this URL in your browser:")
-        print(build_authorization_url(settings, state=args.state))
-        callback = wait_for_oauth_callback(settings)
+        print(build_authorization_url(settings, state=state))
+        callback = wait_for_oauth_callback(settings, expected_state=state)
         token = exchange_code_for_token(settings, code=callback["code"])
         payload = {
             "callback": callback,
