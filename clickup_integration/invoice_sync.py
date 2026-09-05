@@ -855,7 +855,7 @@ def apply_clickup_bc_sales_invoice(
             return {
                 **preview,
                 "status": "failed",
-                "message": str(exc),
+                "message": "Invoice header creation failed. Review the recorded state before retrying.",
                 "created_invoices": created_invoices,
                 "created_lines": created_lines,
             }
@@ -880,7 +880,7 @@ def apply_clickup_bc_sales_invoice(
                     **preview,
                     "status": "failed_partial",
                     "failed_stage": "set_mx_payment_fields",
-                    "message": str(exc),
+                    "message": "Invoice payment-field update failed. Review the existing draft before retrying.",
                     "created_invoice": {
                         "invoice_group": proposed_invoice.get("invoice_group"),
                         **created_invoice,
@@ -925,7 +925,7 @@ def apply_clickup_bc_sales_invoice(
             return {
                 **preview,
                 "status": "failed_partial",
-                "message": str(exc),
+                "message": "Invoice line creation failed. Review the existing draft before retrying.",
                 "created_invoice": created_invoices[0] if created_invoices else None,
                 "created_invoices": created_invoices,
                 "created_lines": created_lines,
@@ -1102,7 +1102,7 @@ def issue_clickup_bc_sales_invoice(
         return {
             **result,
             "status": "failed_post_creation",
-            "message": str(exc),
+            "message": "Invoice finalization failed. Review the recorded posting and certification stages before retrying.",
             "completed_stages": completed_stages,
             "failed_stage": current_stage,
             "posted_invoices": posted_invoices,
@@ -2092,13 +2092,14 @@ def _validate_customer_fel_readiness(
             customer_id=resolved_customer_id,
             market=market,
         )
-    except Exception as exc:
+    except Exception:
+        logger.exception("GT customer invoicing readiness failed customer=%s", resolved_customer_number)
         return {
             "status": "customer_fel_readiness_api_unavailable",
             "message": (
                 f"Business Central customer {resolved_customer_number or resolved_customer_id or 'UNKNOWN'} "
                 "could not be checked against the customer invoicing API before FEL issuance. "
-                f"Publish the customer invoicing API extension with FEL country fields or review BC access. Detail: {exc}"
+                "Publish the customer invoicing API extension with FEL country fields or review BC access. Consult the server logs."
             ),
             "customer_number": resolved_customer_number,
             "customer_id": resolved_customer_id,
@@ -2185,13 +2186,14 @@ def _resolve_market_invoice_settings(
             customer_id=resolved_customer_id,
             market=market,
         )
-    except Exception as exc:
+    except Exception:
+        logger.exception("MX customer invoicing readiness failed customer=%s", resolved_customer_number)
         return {
             "status": "customer_invoicing_api_unavailable",
             "message": (
                 f"Business Central customer {resolved_customer_number or resolved_customer_id or 'UNKNOWN'} "
                 "could not be checked against the customer invoicing API before Mexico CFDI issuance. "
-                f"Detail: {exc}"
+                "Consult the server logs."
             ),
             "market": market,
             "customer_number": resolved_customer_number,
